@@ -2613,7 +2613,7 @@ Options.MultiAttack:SetValue(true)
 
 local AutoQuestToggle = Tabs.Main:AddToggle("AutoQuest", {
  Title       = "Auto Quest",
- Description = "Tự bay tới NPC quest gần nhất (cấp đủ) để nhận quest; tự hủy quest của NPC chưa có tọa độ",
+ Description = "Tự bay tới NPC quest + nhận quest (chỉ invoke khi NPC trong 5 studs). CẢNH BÁO: gọi remote Quest sai cách = BAN — test trên alt trước!",
  Default     = false,
 })
 AutoQuestToggle:OnChanged(function()
@@ -4422,9 +4422,29 @@ QuestAPI.getPlayerLevel = function()
  return (lv and tonumber(lv.Value)) or 0
 end
 
+-- ================== QUEST REMOTE AN TOÀN ==================
+-- Server chỉ nhận quest trong ~5 studs. MỌI invoke quest remote đều qua:
+--   1. questInvokeAllowed() — rate-limit chung tối đa 1 lần / 5s (chống spam → anti-cheat)
+--   2. Cổng khoảng cách 5 studs theo serverPos (vị trí server thấy) — gọi từ xa = nghi exploit = BAN
+--   3. NPC model phải hiện diện trong workspace gần vị trí — remote chỉ chạy khi có chứng cứ thực tế
+
+QuestAPI.lastQuestInvoke = 0
+local function questInvokeAllowed()
+ local nowT = os.clock()
+ if nowT - QuestAPI.lastQuestInvoke < 5 then return false end
+ QuestAPI.lastQuestInvoke = nowT
+ return true
+end
+
+-- Khoảng cách tối đa để gọi takequest — server chỉ nhận quest trong ~5 studs
+local QUEST_TAKE_RANGE = 5
+-- Bán kính tìm model NPC phải hiện diện quanh tọa độ QuestDB (cứng: không có model = không gọi remote)
+local QUEST_NPC_MODEL_RANGE = 50
+
 -- Nhận quest: Events.Quest:InvokeServer({ "takequest", questName })
 QuestAPI.takeQuest = function(questName)
  if not questName then return false end
+ if not questInvokeAllowed() then return false end
  local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
  local remote = events and events:FindFirstChild("Quest")
  if not remote then return false end
@@ -4432,13 +4452,28 @@ QuestAPI.takeQuest = function(questName)
  return ok
 end
 
--- Hủy quest hiện tại: Events.Quest:InvokeServer({ "quit" })
+-- Hủy quest hiện tại: Events.Quest:InvokeServer({ "quit" }) — dùng chung rate-limit 5s
 QuestAPI.cancelQuest = function()
+ if not questInvokeAllowed() then return false end
  local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
  local remote = events and events:FindFirstChild("Quest")
  if not remote then return false end
  local ok = pcall(function() remote:InvokeServer({ "quit" }) end)
  return ok
+end
+
+-- Kiểm tra NPC quest có thực sự tồn tại trong workspace quanh tọa độ (an toàn tuyệt đối)
+QuestAPI.npcPresent = function(npcName, position)
+ if not (npcName and position) then return false end
+ for _, model in ipairs(workspace:GetDescendants()) do
+  if model.Name == npcName and model:IsA("Model") then
+   local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+   if root and (root.Position - position).Magnitude <= QUEST_NPC_MODEL_RANGE then
+    return true
+   end
+  end
+ end
+ return false
 end
 
 -- Tên quest gửi đi: field `quest` trong QuestDB nếu có, mặc định "Help <NPC>"
@@ -4466,21 +4501,78 @@ QuestAPI.findAvailable = function()
  return bestName, bestDb
 end
 
--- Bay tới NPC + nhận quest, kiểm tra quest xuất hiện (thử tối đa 3 lần)
--- Luôn gọi takeQuest TRƯỚC khi kiểm tra (quest cũ vừa xong còn hiển thị → takequest sẽ nộp + nhận quest mới)
--- Thất bại cả 3 lần → cooldown NPC 10s (thử NPC khác)
+-- Bay tới NPC + nhận quest (tối đa 2 lần, MỖI lần đều phải cách NPC <= 5 studs theo serverPos)
+-- CHỐNG BAN (server chỉ nhận quest trong ~5 studs):
+--   1. NPC model phải hiện diện trong workspace quanh tọa độ — không có → không gọi remote
+--   2. serverPos phải cách NPC <= 5 studs — chưa gần thì kéo sát bằng BV (không CFrame), 8s không tới → bỏ + cooldown 30s
+--   3. Trước MỖI lần invoke, kiểm tra lại khoảng cách (nếu lệch do vật cản thì kéo lại, không bao giờ invoke từ xa)
 QuestAPI.goTake = function(npcName, db, speed)
  if not (npcName and db and db.position) then return false end
  local questName = QuestAPI.questNameOf(npcName, db)
  if not questName then return false end
+ local npcPos = db.position
+
+ -- Cổng 1: NPC phải thực sự tồn tại quanh tọa độ (tọa độ sai → hủy an toàn, không invoke)
+ if not QuestAPI.npcPresent(npcName, npcPos) then
+  print(string.format("[AutoQuest] KHÔNG thấy model NPC '%s' quanh tọa độ — bỏ qua, tránh ban", npcName))
+  QuestAPI.skipUntil[npcName] = os.clock() + 30
+  return false
+ end
+
  print(string.format("[AutoQuest] Bay tới NPC '%s' (%s)...", npcName, questName))
- flyToWaypointSky(db.position, speed or 75)
- task.wait(0.5)
- for attempt = 1, 3 do
+ flyToWaypointSky(npcPos, speed or 75)
+
+ local function inRange()
+  local myPos = getPlayerPosition()
+  return (myPos and (myPos - npcPos).Magnitude <= QUEST_TAKE_RANGE) or false
+ end
+
+ -- Ép tới gần NPC trước khi gọi remote (tối đa 8s, dùng BV — không CFrame)
+ local t0 = os.clock()
+ while os.clock() - t0 < 8 do
   if not AutoFarm.active then return false end
+  if inRange() then break end
+  local myHrp = getHumanoidRootPart()
+  if myHrp and FlyPathfinder.currentBV and FlyPathfinder.currentBV.Parent then
+   local d = (npcPos - myHrp.Position).Magnitude
+   FlyPathfinder.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, speed or 75)
+  end
+  task.wait(0.15)
+ end
+
+ if not inRange() then
+  print(string.format("[AutoQuest] KHÔNG gần NPC '%s' (<=5 studs) — bỏ qua nhận quest (tránh ban)", npcName))
+  QuestAPI.skipUntil[npcName] = os.clock() + 30
+  return false
+ end
+
+ for attempt = 1, 2 do
+  if not AutoFarm.active then return false end
+  -- Cổng 2 trước MỖI invoke: nếu lệch ra ngoài 5 studs do vật cản → kéo lại tối đa 3s
+  if not inRange() then
+   local tp = os.clock()
+   while os.clock() - tp < 3 do
+    if not inRange() then
+     local myHrp = getHumanoidRootPart()
+     if myHrp and FlyPathfinder.currentBV and FlyPathfinder.currentBV.Parent then
+      local d = (npcPos - myHrp.Position).Magnitude
+      FlyPathfinder.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, speed or 75)
+     end
+     task.wait(0.15)
+    else
+     break
+    end
+   end
+   if not inRange() then
+    print(string.format("[AutoQuest] Lệch khỏi NPC '%s' — hủy nhận quest (tránh ban)", npcName))
+    QuestAPI.skipUntil[npcName] = os.clock() + 30
+    return false
+   end
+  end
+
   print(string.format("[AutoQuest] Nhận quest (lần %d): %s", attempt, questName))
   QuestAPI.takeQuest(questName)
-  task.wait(1.2)
+  task.wait(1.5)
   local q = getQuestInfo()
   if not q then
    -- Quest cũ đã biến mất (nộp xong) → vòng ngoài tiếp tục
@@ -4495,8 +4587,8 @@ QuestAPI.goTake = function(npcName, db, speed)
    return true
   end
  end
- QuestAPI.skipUntil[npcName] = os.clock() + 10
- print(string.format("[AutoQuest] Thất bại nhận quest '%s' — cooldown NPC '%s' 10s", questName, npcName))
+ QuestAPI.skipUntil[npcName] = os.clock() + 30
+ print(string.format("[AutoQuest] Thất bại nhận quest '%s' — cooldown NPC '%s' 30s", questName, npcName))
  return false
 end
 
