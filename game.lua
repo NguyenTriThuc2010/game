@@ -2468,17 +2468,37 @@ local function autoFarmLoop()
  while AutoFarm.active and isPlayerAlive() do
   local quest = getQuestInfo()
   if not quest then
-   -- Chua co quest -> cho quest moi
-   setAutoFarmStatus("WaitingQuest", "Chưa có Quest — quét lại sau 1.5s")
-   task.wait(1.5)
+   if Options.AutoQuest.Value then
+    -- Tự bay tới NPC quest gần nhất (cấp đủ) để nhận quest
+    local npcName, db = QuestAPI.findAvailable()
+    if npcName then
+     setAutoFarmStatus("Bay", string.format("Bay tới NPC quest: %s", npcName))
+     QuestAPI.goTake(npcName, db, AutoFarm.speed)
+     task.wait(0.3)
+    else
+     setAutoFarmStatus("WaitingQuest", "Không có NPC quest hợp lệ (tọa độ/cấp) — quét lại sau 1.5s")
+     task.wait(1.5)
+    end
+   else
+    -- Chua co quest -> cho quest moi
+    setAutoFarmStatus("WaitingQuest", "Chưa có Quest — quét lại sau 1.5s")
+    task.wait(1.5)
+   end
   else
    -- Bỏ qua quest của NPC chưa có tọa độ trong QuestDB (không bay tới được)
    local questNPC = getCurrentQuestNPC()
    if questNPC then
     local db = QuestDB[questNPC]
     if not (db and db.position) then
-     setAutoFarmStatus("WaitingQuest", string.format("Skip quest '%s' — NPC '%s' chưa có tọa độ", quest.Target, questNPC))
-     task.wait(1.5)
+     if Options.AutoQuest.Value then
+      -- Hủy quest để nhận quest khác có tọa độ
+      setAutoFarmStatus("WaitingQuest", string.format("Hủy quest '%s' — NPC '%s' chưa có tọa độ", quest.Target, questNPC))
+      QuestAPI.cancelQuest()
+      task.wait(1.0)
+     else
+      setAutoFarmStatus("WaitingQuest", string.format("Skip quest '%s' — NPC '%s' chưa có tọa độ", quest.Target, questNPC))
+      task.wait(1.5)
+     end
      continue
     end
    end
@@ -2487,9 +2507,27 @@ local function autoFarmLoop()
     and (quest.Progress.total - quest.Progress.current)
     or 1
    if remaining <= 0 then
-    -- Xong quest, cho quest moi
-    setAutoFarmStatus("QuestDone", string.format("Đã xong: %s (%s)", quest.Target, quest.ProgressText))
-    task.wait(1.5)
+    -- Xong quest
+    if Options.AutoQuest.Value then
+     -- Tự bay lại NPC quest để nhận quest KẾ TIẾP (chu trình khép kín)
+     setAutoFarmStatus("QuestDone", string.format("Đã xong: %s — bay tới NPC nhận quest mới", quest.Target))
+     local questNPC = getCurrentQuestNPC()
+     local db = questNPC and QuestDB[questNPC]
+     if not (db and db.position) then
+      questNPC, db = QuestAPI.findAvailable()
+     end
+     if questNPC and db then
+      QuestAPI.goTake(questNPC, db, AutoFarm.speed)
+      task.wait(0.3)
+     else
+      setAutoFarmStatus("WaitingQuest", "Không có NPC quest hợp lệ (tọa độ/cấp) — quét lại sau 1.5s")
+      task.wait(1.5)
+     end
+    else
+     -- Xong quest, cho quest moi
+     setAutoFarmStatus("QuestDone", string.format("Đã xong: %s (%s)", quest.Target, quest.ProgressText))
+     task.wait(1.5)
+    end
    else
     local found = getNPCsByName(quest.Target, remaining)
     if #found == 0 then
@@ -2572,6 +2610,15 @@ MultiAttackToggle:OnChanged(function()
  notify("Multi Attack: " .. (MultiAttack.enabled and "ON" or "OFF"), 2)
 end)
 Options.MultiAttack:SetValue(true)
+
+local AutoQuestToggle = Tabs.Main:AddToggle("AutoQuest", {
+ Title       = "Auto Quest",
+ Description = "Tự bay tới NPC quest gần nhất (cấp đủ) để nhận quest; tự hủy quest của NPC chưa có tọa độ",
+ Default     = false,
+})
+AutoQuestToggle:OnChanged(function()
+ notify("Auto Quest: " .. (Options.AutoQuest.Value and "ON" or "OFF"), 2)
+end)
 
 -- ==============================================================================
 -- IMPEL DOWN: SMART FLY WAYPOINTS + CHEST LOOT + AUTO STATS + COMBAT
@@ -4360,6 +4407,98 @@ local function flyToWaypointSky(targetPos, speed)
 end
 
 _G.FlyPathfinder = FlyPathfinder
+
+-- ================== AUTO QUEST ==================
+-- Định nghĩa SAU flyToWaypointSky (cần bay tới NPC); global để autoFarmLoop (định nghĩa trước) dùng được
+local QuestAPI = {}
+_G.QuestAPI = QuestAPI
+
+-- Cấp người chơi: Stats<Player>.Stats.Level (IntValue)
+QuestAPI.getPlayerLevel = function()
+ local rs = game:GetService("ReplicatedStorage")
+ local pStats = rs:FindFirstChild("Stats" .. Player.Name) or (rs:FindFirstChild("Stats") and rs.Stats:FindFirstChild(Player.Name))
+ local s = pStats and pStats:FindFirstChild("Stats")
+ local lv = s and s:FindFirstChild("Level")
+ return (lv and tonumber(lv.Value)) or 0
+end
+
+-- Nhận quest: Events.Quest:InvokeServer({ "takequest", questName })
+QuestAPI.takeQuest = function(questName)
+ if not questName then return false end
+ local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+ local remote = events and events:FindFirstChild("Quest")
+ if not remote then return false end
+ local ok = pcall(function() remote:InvokeServer({ "takequest", questName }) end)
+ return ok
+end
+
+-- Hủy quest hiện tại: Events.Quest:InvokeServer({ "quit" })
+QuestAPI.cancelQuest = function()
+ local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+ local remote = events and events:FindFirstChild("Quest")
+ if not remote then return false end
+ local ok = pcall(function() remote:InvokeServer({ "quit" }) end)
+ return ok
+end
+
+-- Tên quest gửi đi: field `quest` trong QuestDB nếu có, mặc định "Help <NPC>"
+QuestAPI.questNameOf = function(npcName, db)
+ db = db or QuestDB[npcName]
+ if not db then return nil end
+ return db.quest or ("Help " .. npcName)
+end
+
+-- NPC quest khả dụng: có position + minLevel <= cấp + có targets (bỏ Zen/Noah/Zhen chưa có thông tin) — chọn cái GẦN NHẤT
+-- Bỏ qua NPC đang trong cooldown (nhận quest thất bại gần đây)
+QuestAPI.skipUntil = {}
+QuestAPI.findAvailable = function()
+ local lvl = QuestAPI.getPlayerLevel()
+ local myPos = getPlayerPosition()
+ local nowT = os.clock()
+ local bestName, bestDb, bestDist = nil, nil, math.huge
+ for npcName, db in pairs(QuestDB) do
+  if db.position and db.minLevel and db.targets and db.minLevel <= lvl
+   and not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
+   local d = myPos and (db.position - myPos).Magnitude or 0
+   if d < bestDist then bestName, bestDb, bestDist = npcName, db, d end
+  end
+ end
+ return bestName, bestDb
+end
+
+-- Bay tới NPC + nhận quest, kiểm tra quest xuất hiện (thử tối đa 3 lần)
+-- Luôn gọi takeQuest TRƯỚC khi kiểm tra (quest cũ vừa xong còn hiển thị → takequest sẽ nộp + nhận quest mới)
+-- Thất bại cả 3 lần → cooldown NPC 10s (thử NPC khác)
+QuestAPI.goTake = function(npcName, db, speed)
+ if not (npcName and db and db.position) then return false end
+ local questName = QuestAPI.questNameOf(npcName, db)
+ if not questName then return false end
+ print(string.format("[AutoQuest] Bay tới NPC '%s' (%s)...", npcName, questName))
+ flyToWaypointSky(db.position, speed or 75)
+ task.wait(0.5)
+ for attempt = 1, 3 do
+  if not AutoFarm.active then return false end
+  print(string.format("[AutoQuest] Nhận quest (lần %d): %s", attempt, questName))
+  QuestAPI.takeQuest(questName)
+  task.wait(1.2)
+  local q = getQuestInfo()
+  if not q then
+   -- Quest cũ đã biến mất (nộp xong) → vòng ngoài tiếp tục
+   return true
+  end
+  if q.Progress and (q.Progress.total - q.Progress.current) > 0 then
+   -- Quest MỚI đang chạy (chưa xong)
+   return true
+  end
+  if q.Text and q.Text ~= "" and q.Text ~= questName then
+   -- Quest khác đã xuất hiện (đã đổi quest) — xem như nhận thành công
+   return true
+  end
+ end
+ QuestAPI.skipUntil[npcName] = os.clock() + 10
+ print(string.format("[AutoQuest] Thất bại nhận quest '%s' — cooldown NPC '%s' 10s", questName, npcName))
+ return false
+end
 
 -- Tìm Zones.End của floor hiện tại (mỗi floor mê cung có Effects.Zones.End)
 local function findFloorEndZone()
