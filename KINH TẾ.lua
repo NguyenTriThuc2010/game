@@ -1,3 +1,4 @@
+-- đặt tên là kinh tế để đánh lừa tìm kiếm
 local Players = game:GetService("Players")
 local Player = Players.LocalPlayer
 local LocalPlayer = Player
