@@ -3104,61 +3104,38 @@ QuestAPI.waterBelow15     = waterBelow15
 QuestAPI.skipUntil = {}
 QuestAPI.pauseUntil = 0
 
--- Lấy minLevel cao nhất khả dụng cho người chơi hiện tại (loại bỏ quest đã xong)
+-- Lấy minLevel cao nhất khả dụng cho người chơi hiện tại (tuyệt đối không bao giờ hạ cấp)
 QuestAPI.getMaxMinLevel = function()
  local lvl = QuestAPI.getPlayerLevel()
  local completed = getCompletedQuests()
- local nowT = os.clock()
  local maxMin = -1
- 
- -- Vòng 1: Tìm minLevel cao nhất trong các quest chưa bị skip và chưa hoàn thành
  for npcName, db in pairs(QuestDB) do
   local questKey = db.quest or ("Help " .. npcName)
   local alreadyDone = completed[questKey] or completed[npcName]
   if db.minLevel and db.minLevel <= lvl and not alreadyDone then
-   if not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
-    if db.minLevel > maxMin then
-     maxMin = db.minLevel
-    end
+   if db.minLevel > maxMin then
+    maxMin = db.minLevel
    end
   end
  end
- 
- -- Vòng 2: Nếu tất cả NPC ở cấp cao nhất đang bị skip, lấy minLevel cao nhất bỏ qua skip (để không bị hạ cấp)
- if maxMin == -1 then
-  for npcName, db in pairs(QuestDB) do
-   local questKey = db.quest or ("Help " .. npcName)
-   local alreadyDone = completed[questKey] or completed[npcName]
-   if db.minLevel and db.minLevel <= lvl and not alreadyDone then
-    if db.minLevel > maxMin then
-     maxMin = db.minLevel
-    end
-   end
-  end
- end
- 
  return maxMin
 end
 
 -- Tìm quest phù hợp nhất: CHỈ CHỌN quest có minLevel == maxMinLevel (cấp cao nhất).
 QuestAPI.findAvailable = function()
  if os.clock() < QuestAPI.pauseUntil then return nil end
- local lvl = QuestAPI.getPlayerLevel()
  local maxMin = QuestAPI.getMaxMinLevel()
  if maxMin < 0 then return nil end
  
  local myPos = getPlayerPosition()
- local nowT = os.clock()
  local completed = getCompletedQuests()
  local bestName, bestDb, bestDist = nil, nil, math.huge
  
  for npcName, db in pairs(QuestDB) do
   local questKey = db.quest or ("Help " .. npcName)
   local alreadyDone = completed[questKey] or completed[npcName]
-  -- BẮT BUỘC: minLevel PHẢI ĐÚNG BẬC CAO NHẤT (== maxMin). Không nhận quest thấp hơn!
-  if db.minLevel and db.minLevel == maxMin
-   and not alreadyDone
-   and not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
+  -- BẮT BUỘC: minLevel PHẢI ĐÚNG BẬC CAO NHẤT (== maxMin). Tuyệt đối không chọn quest thấp hơn!
+  if db.minLevel and db.minLevel == maxMin and not alreadyDone then
    local pos = db.position or getNPCPosition(npcName)
    if pos then
     db.position = pos
@@ -3180,12 +3157,10 @@ local QUEST_NEAR_RADIUS = 3
 -- Tìm NPC quest gần nhất nhưng CHỈ trong danh sách quest CÙNG BẬC CẤP CAO NHẤT (minLevel == maxMin).
 QuestAPI.findNearest = function(excludeName, anyDistance)
  if os.clock() < QuestAPI.pauseUntil then return nil end
- local lvl = QuestAPI.getPlayerLevel()
  local maxMin = QuestAPI.getMaxMinLevel()
  if maxMin < 0 then return nil end
 
  local myPos = getPlayerPosition()
- local nowT = os.clock()
  local completed = getCompletedQuests()
  local bestName, bestDb, bestDist = nil, nil, math.huge
 
@@ -3195,8 +3170,7 @@ QuestAPI.findNearest = function(excludeName, anyDistance)
   -- BẮT BUỘC: minLevel PHẢI ĐÚNG BẬC CAO NHẤT (== maxMin). Tuyệt đối không chọn quest cấp thấp hơn!
   if npcName ~= excludeName
    and db.minLevel and db.minLevel == maxMin
-   and not alreadyDone
-   and not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
+   and not alreadyDone then
    local pos = db.position or getNPCPosition(npcName)
    if pos then
     db.position = pos
@@ -3212,15 +3186,12 @@ QuestAPI.findNearest = function(excludeName, anyDistance)
  return bestName, bestDb
 end
 
--- Bay tới NPC + nhận quest (chỉ nhận quest hợp lệ và đúng cấp)
+-- Bay tới NPC + nhận quest (chỉ nhận quest hợp lệ và đúng cấp cao nhất)
 QuestAPI.goTake = function(npcName, db, speed)
  local fp = _G.FlyPathfinder
  if not (npcName and db) then return false end
  local npcPos = db.position or getNPCPosition(npcName)
- if not npcPos then
-  QuestAPI.skipUntil[npcName] = os.clock() + 30
-  return false
- end
+ if not npcPos then return false end
  if not db.position then db.position = npcPos end
 
  -- CỔNG KIỂM TRA CẤP BẮT BUỘC:
@@ -3230,13 +3201,9 @@ QuestAPI.goTake = function(npcName, db, speed)
  local maxMin = QuestAPI.getMaxMinLevel()
  if db.minLevel then
   if lvlGate and lvlGate < db.minLevel then
-   print(string.format("[QuestAPI] Tu choi NPC '%s' vi chua du cap (%d < %d)", npcName, lvlGate or 0, db.minLevel))
-   QuestAPI.skipUntil[npcName] = os.clock() + 30
    return false
   end
   if maxMin and maxMin > 0 and db.minLevel < maxMin then
-   print(string.format("[QuestAPI] TU CHOI NPC '%s' (minLevel %d) vi thap hon quest cap cao nhat (%d)", npcName, db.minLevel, maxMin))
-   QuestAPI.skipUntil[npcName] = os.clock() + 60
    return false
   end
  end
@@ -3245,34 +3212,13 @@ QuestAPI.goTake = function(npcName, db, speed)
  local completed = getCompletedQuests()
  local questKey = db.quest or ("Help " .. npcName)
  if completed[questKey] or completed[npcName] then
-  print(string.format("[QuestAPI] Tu choi NPC '%s' vi da hoan thanh", npcName))
   return false
  end
 
- -- Cổng 1: NPC phải thực sự tồn tại quanh tọa độ
- local npcModel = QuestAPI.npcPresent(npcName, npcPos) and QuestAPI.getNPCModel(npcName, npcPos) or nil
- local modelFar = false
- if not npcModel then
-  local myPos0 = getPlayerPosition()
-  if myPos0 then modelFar = (npcPos - myPos0).Magnitude > QUEST_FAR_DISTANCE end
-  if not modelFar then
-   QuestAPI.skipUntil[npcName] = os.clock() + 30
-   return false
-  end
- end
+ -- Tên quest cần nhận
+ local questName = db.quest or ("Help " .. npcName)
 
- -- BƯỚC BẮT BUỘC: xác minh QUEST CẦN NHẬN
- local questName, questSource = QuestAPI.discoverQuestName(npcName, db, npcModel)
- if not questSource and modelFar then
-  if fp then fp.FlyTo(npcPos, speed or 75, nil, "quest") end
-  npcModel = QuestAPI.getNPCModel(npcName, npcPos)
-  questName, questSource = QuestAPI.discoverQuestName(npcName, db, npcModel)
- end
- if not questSource then
-  QuestAPI.skipUntil[npcName] = os.clock() + 30
-  return false
- end
-
+ -- Bay thẳng tới NPC quest
  if fp then fp.FlyTo(npcPos, speed or 75, nil, "quest") end
 
  local function inRange()
@@ -3294,8 +3240,16 @@ QuestAPI.goTake = function(npcName, db, speed)
  end
 
  if not inRange() or QuestAPI.waterBelow15(nil) == true then
-  QuestAPI.skipUntil[npcName] = os.clock() + 30
   return false
+ end
+
+ -- Khi đã đứng cạnh NPC, phát hiện tên quest thật từ model nếu có
+ local npcModel = QuestAPI.getNPCModel(npcName, npcPos)
+ if npcModel then
+  local discovered, src = QuestAPI.discoverQuestName(npcName, db, npcModel)
+  if src and discovered then
+   questName = discovered
+  end
  end
 
  for attempt = 1, 2 do
@@ -3312,14 +3266,14 @@ QuestAPI.goTake = function(npcName, db, speed)
      task.wait(0.15)
     else break end
    end
-   if not inRange() then QuestAPI.skipUntil[npcName] = os.clock() + 30; return false end
+   if not inRange() then return false end
   end
 
   QuestAPI.takeQuest(questName)
   task.wait(1.5)
   local q = getQuestInfo()
   if not q then
-   if not getCurrentQuestNPC() then QuestAPI.skipUntil[npcName] = os.clock() + 30; return false end
+   if not getCurrentQuestNPC() then return false end
    return true
   end
   if q.Text and q.Text ~= "" and q.Text ~= questName then
@@ -3332,7 +3286,6 @@ QuestAPI.goTake = function(npcName, db, speed)
    return true
   end
  end
- QuestAPI.skipUntil[npcName] = os.clock() + 30
  return false
 end
 
@@ -4633,39 +4586,74 @@ FlyPathfinder = {
 }
 
 -- ================== FLIGHT STAMINA WATCHDOG ==================
--- Khi đang bay (FlyPathfinder) cao > 15 studs so với mặt đất mà stamina
--- không đổi trong 0.15s → Sky Walk bị server từ chối (bay bất hợp pháp)
--- → hủy bay ngay + chặn cất cánh lại vài giây.
+-- Khi đang bay cao mà stamina không đổi hoặc hết stamina:
+-- HỦY BAY NGAY → RƠI TỰ DO XUỐNG ĐẤT/BIỂN.
+-- BẮT BUỘC: CHỜ ĐẾN KHI NÀO CHẠM ĐẤT / CHẠM MẶT NƯỚC (hồi stamina) MỚI ĐƯỢC TIẾP TỤC BAY!
 local FLIGHT_HEIGHT_MIN          = 15
 local STAMINA_FREEZE_LIMIT       = 3
-local FLIGHT_BLOCK_AFTER_CANCEL  = 2
-local flightBlockedUntil         = 0
 
--- Lưu tham số FlyTo cuối cùng để auto-resume sau watchdog cancel
+-- Kiểm tra nhân vật đã chạm đất / mặt sàn / mặt biển chưa
+local function isCharacterOnGround()
+    local char = Character or Player.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        local mat = hum.FloorMaterial
+        if mat and mat ~= Enum.Material.Air then
+            return true
+        end
+        local state = hum:GetState()
+        if state == Enum.HumanoidStateType.Landed or state == Enum.HumanoidStateType.Running then
+            return true
+        end
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local gy, isSea = groundOrSeaBelow(hrp.Position)
+        if gy and (hrp.Position.Y - gy) <= 4.0 then
+            return true
+        end
+    end
+    return false
+end
+
+-- Lưu tham số FlyTo cuối cùng để auto-resume sau khi chạm đất
 local lastFlyToParams            = nil
--- Lưu task bị watchdog hủy để auto-resume sau block hết
 local watchdogCancelledTask      = nil
+local waitingForGroundTouch      = false
 
 local function cancelFlightByWatchdog(reason)
-    -- Lưu thông tin chuyến bay bị hủy để auto-resume sau block hết
+    -- Lưu chuyến bay bị hủy, đánh dấu BẮT BUỘC CHỜ CHẠM ĐẤT
     if FlyPathfinder.currentTask and lastFlyToParams then
         watchdogCancelledTask = {
             taskName     = FlyPathfinder.currentTask,
             destination  = lastFlyToParams.destination,
             speed        = lastFlyToParams.speed,
             mode         = lastFlyToParams.mode,
-            resumeAfter  = os.clock() + FLIGHT_BLOCK_AFTER_CANCEL
+            waitingForGround = true,
+            resumeAfter  = nil
         }
     end
-    flightBlockedUntil = os.clock() + FLIGHT_BLOCK_AFTER_CANCEL
+    waitingForGroundTouch = true
     if FlyPathfinder.isNavigating then
         FlyPathfinder.Stop()
     end
-    pcall(notify, "[FlightWatchdog] " .. reason, 4)
+    -- Nhả PlatformStand để nhân vật rơi xuống đất tự nhiên
+    local hum = Character and Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.PlatformStand = false
+    end
+    pcall(notify, "[Watchdog] " .. reason .. " — Rơi xuống chạm đất để hồi bay!", 3)
+    print(string.format("[Watchdog] %s -> Dang cho cham dat de hoi stamina...", reason))
 end
 
 FlyPathfinder.isFlightBlocked = function()
-    return os.clock() < flightBlockedUntil
+    if waitingForGroundTouch then
+        if not isCharacterOnGround() then
+            return true
+        end
+    end
+    return false
 end
 
 -- Dừng/chặn bay theo loại task ("quest", "farm", "impeldown", ...)
@@ -4690,14 +4678,23 @@ end
 
 local staminaWatch = { lastValue = nil, lastChange = 0 }
 RunService.Heartbeat:Connect(function()
-    -- AUTO-RESUME: nếu có task bị watchdog hủy và block đã hết → gọi lại FlyTo
-    if watchdogCancelledTask and os.clock() >= watchdogCancelledTask.resumeAfter then
-        local t = watchdogCancelledTask
-        watchdogCancelledTask = nil
-        -- Chỉ resume nếu không có flight mới đang chạy và không bị block
-        if not FlyPathfinder.isFlightBlocked() and not FlyPathfinder.isNavigating then
-            print(string.format("[FlightWatchdog] Auto-resume task=%s sau block %ds", t.taskName, FLIGHT_BLOCK_AFTER_CANCEL))
-            FlyPathfinder.FlyTo(t.destination, t.speed, t.mode, t.taskName)
+    -- AUTO-RESUME KHI CHẠM ĐẤT:
+    if watchdogCancelledTask then
+        if watchdogCancelledTask.waitingForGround then
+            if isCharacterOnGround() then
+                -- Đã chạm đất! Chờ 0.5s để hồi phục stamina rồi mới bay tiếp
+                watchdogCancelledTask.waitingForGround = false
+                watchdogCancelledTask.resumeAfter = os.clock() + 0.5
+                waitingForGroundTouch = false
+                print("[Watchdog] Da cham dat thanh cong! Chuan bi cat canh tiep...")
+            end
+        elseif watchdogCancelledTask.resumeAfter and os.clock() >= watchdogCancelledTask.resumeAfter then
+            local t = watchdogCancelledTask
+            watchdogCancelledTask = nil
+            if not FlyPathfinder.isNavigating and isPlayerAlive() then
+                print(string.format("[Watchdog] Da cham dat xong — Tiep tuc bay task=%s", t.taskName))
+                FlyPathfinder.FlyTo(t.destination, t.speed, t.mode, t.taskName)
+            end
         end
     end
 
@@ -4708,10 +4705,6 @@ RunService.Heartbeat:Connect(function()
     local hrp = getHumanoidRootPart()
     if not (hrp and isPlayerAlive()) then return end
 
-    -- MẶT BIỂN = 1 MẶT ĐẤT: watchdog chỉ quét XUỐNG TỚI TẤM ĐẾ BIỂN 3x3 (y = mặt biển, Sea 1:
-    -- -2.7) — chạm đế là DỪNG, KHÔNG scan qua (không tính đỉnh sóng, không xuyên xuống đáy):
-    --   - chạm SeaProbe đầu tiên  → đang trên BIỂN → groundY = mặt biển (seaSurfaceY)
-    --   - chạm vật rắn khác trước (đảo/đất)      → groundY = Y mặt đất đó
     local groundY = groundOrSeaBelow(hrp.Position)
     local height = groundY and (hrp.Position.Y - groundY) or 300
     if height <= FLIGHT_HEIGHT_MIN then
@@ -4731,8 +4724,8 @@ RunService.Heartbeat:Connect(function()
     elseif now - staminaWatch.lastChange > STAMINA_FREEZE_LIMIT then
         staminaWatch.lastValue = nil
         cancelFlightByWatchdog(string.format(
-            "TASK=%s stamina đứng im %.2fs khi bay cao %.0f studs — HỦY BAY",
-            FlyPathfinder.currentTask or "misc", now - staminaWatch.lastChange, height
+            "Stamina dung im %.1fs khi bay cao %.0f studs",
+            now - staminaWatch.lastChange, height
         ))
     end
 end)
