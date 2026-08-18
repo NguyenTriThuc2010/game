@@ -3099,65 +3099,120 @@ QuestAPI.canDrainStamina  = canDrainStamina
 QuestAPI.seaFlyLowActive  = seaFlyLowActive
 QuestAPI.waterBelow15     = waterBelow15
 
--- NPC quest khả dụng: có position + minLevel <= cấp + có targets (bỏ Zen/Noah/Zhen chưa có thông tin)
--- CHỌN QUEST PHÙ HỢP CẤP: ưu tiên minLevel CAO NHẤT <= cấp hiện tại (quest đúng tầm, rewards tốt);
--- cùng minLevel thì chọn cái GẦN NHẤT. Bỏ qua NPC trong cooldown + pauseUntil.
+-- NPC quest khả dụng: BẮT BUỘC chỉ chọn quest có minLevel CAO NHẤT phù hợp cấp người chơi.
+-- TUYỆT ĐỐI KHÔNG bay tới hay nhận bất kỳ quest nào thấp hơn cấp hiện tại!
 QuestAPI.skipUntil = {}
 QuestAPI.pauseUntil = 0
+
+-- Lấy minLevel cao nhất khả dụng cho người chơi hiện tại (loại bỏ quest đã xong)
+QuestAPI.getMaxMinLevel = function()
+ local lvl = QuestAPI.getPlayerLevel()
+ local completed = getCompletedQuests()
+ local nowT = os.clock()
+ local maxMin = -1
+ 
+ -- Vòng 1: Tìm minLevel cao nhất trong các quest chưa bị skip và chưa hoàn thành
+ for npcName, db in pairs(QuestDB) do
+  local questKey = db.quest or ("Help " .. npcName)
+  local alreadyDone = completed[questKey] or completed[npcName]
+  if db.minLevel and db.minLevel <= lvl and not alreadyDone then
+   if not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
+    if db.minLevel > maxMin then
+     maxMin = db.minLevel
+    end
+   end
+  end
+ end
+ 
+ -- Vòng 2: Nếu tất cả NPC ở cấp cao nhất đang bị skip, lấy minLevel cao nhất bỏ qua skip (để không bị hạ cấp)
+ if maxMin == -1 then
+  for npcName, db in pairs(QuestDB) do
+   local questKey = db.quest or ("Help " .. npcName)
+   local alreadyDone = completed[questKey] or completed[npcName]
+   if db.minLevel and db.minLevel <= lvl and not alreadyDone then
+    if db.minLevel > maxMin then
+     maxMin = db.minLevel
+    end
+   end
+  end
+ end
+ 
+ return maxMin
+end
+
+-- Tìm quest phù hợp nhất: CHỈ CHỌN quest có minLevel == maxMinLevel (cấp cao nhất).
 QuestAPI.findAvailable = function()
  if os.clock() < QuestAPI.pauseUntil then return nil end
  local lvl = QuestAPI.getPlayerLevel()
+ local maxMin = QuestAPI.getMaxMinLevel()
+ if maxMin < 0 then return nil end
+ 
  local myPos = getPlayerPosition()
  local nowT = os.clock()
- -- Lay danh sach quest da hoan thanh de loc bo (dung QuestName hoac db.quest lam key)
  local completed = getCompletedQuests()
- local bestName, bestDb, bestMin, bestDist = nil, nil, -1, math.huge
+ local bestName, bestDb, bestDist = nil, nil, math.huge
+ 
  for npcName, db in pairs(QuestDB) do
-  -- Kiem tra quest nay da hoan thanh chua (khop voi db.quest hoac npcName)
   local questKey = db.quest or ("Help " .. npcName)
   local alreadyDone = completed[questKey] or completed[npcName]
-  if db.position and db.minLevel and db.targets and db.minLevel <= lvl
+  -- BẮT BUỘC: minLevel PHẢI ĐÚNG BẬC CAO NHẤT (== maxMin). Không nhận quest thấp hơn!
+  if db.minLevel and db.minLevel == maxMin
    and not alreadyDone
    and not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
-   local d = myPos and (db.position - myPos).Magnitude or 0
-   if db.minLevel > bestMin or (db.minLevel == bestMin and d < bestDist) then
-    bestName, bestDb, bestMin, bestDist = npcName, db, db.minLevel, d
+   local pos = db.position or getNPCPosition(npcName)
+   if pos then
+    db.position = pos
+    local d = myPos and (pos - myPos).Magnitude or 0
+    if d < bestDist then
+     bestName, bestDb, bestDist = npcName, db, d
+    end
+   elseif not bestName then
+    bestName, bestDb = npcName, db
    end
   end
  end
  return bestName, bestDb
 end
 
--- Bán kính "đứng gần NPC quest" để kích hoạt quest đó (đứng cạnh + bật farm → nhận ngay, không bay xa)
+-- Bán kính "đứng gần NPC quest" để kích hoạt quest đó
 local QUEST_NEAR_RADIUS = 3
 
---- NPC quest GẦN NHẤT (minLevel <= cấp): dùng khi ĐỨNG GẦN NPC muốn farm (anyDistance=false → trong
---- bán kính QUEST_NEAR_RADIUS) hoặc FALLBACK khi không thể bay tới quest hợp lý (anyDistance=true).
---- excludeName: loại NPC vừa thất bại. Trả (name, db) hoặc (nil, nil)
+-- Tìm NPC quest gần nhất nhưng CHỈ trong danh sách quest CÙNG BẬC CẤP CAO NHẤT (minLevel == maxMin).
 QuestAPI.findNearest = function(excludeName, anyDistance)
  if os.clock() < QuestAPI.pauseUntil then return nil end
  local lvl = QuestAPI.getPlayerLevel()
+ local maxMin = QuestAPI.getMaxMinLevel()
+ if maxMin < 0 then return nil end
+
  local myPos = getPlayerPosition()
  local nowT = os.clock()
- -- Lay danh sach quest da hoan thanh de loc bo
  local completed = getCompletedQuests()
  local bestName, bestDb, bestDist = nil, nil, math.huge
+
  for npcName, db in pairs(QuestDB) do
   local questKey = db.quest or ("Help " .. npcName)
   local alreadyDone = completed[questKey] or completed[npcName]
-  if npcName ~= excludeName and db.position and db.minLevel and db.targets and db.minLevel <= lvl
+  -- BẮT BUỘC: minLevel PHẢI ĐÚNG BẬC CAO NHẤT (== maxMin). Tuyệt đối không chọn quest cấp thấp hơn!
+  if npcName ~= excludeName
+   and db.minLevel and db.minLevel == maxMin
    and not alreadyDone
    and not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
-   local d = myPos and (db.position - myPos).Magnitude or 0
-   if d <= QUEST_NEAR_RADIUS or anyDistance then
-    if d < bestDist then bestName, bestDb, bestDist = npcName, db, d end
+   local pos = db.position or getNPCPosition(npcName)
+   if pos then
+    db.position = pos
+    local d = myPos and (pos - myPos).Magnitude or 0
+    if d <= QUEST_NEAR_RADIUS or anyDistance then
+     if d < bestDist then
+      bestName, bestDb, bestDist = npcName, db, d
+     end
+    end
    end
   end
  end
  return bestName, bestDb
 end
 
--- Bay tới NPC + nhận quest (tối đa 2 lần, MỖI lần đều phải cách NPC <= 5 studs theo serverPos)
+-- Bay tới NPC + nhận quest (chỉ nhận quest hợp lệ và đúng cấp)
 QuestAPI.goTake = function(npcName, db, speed)
  local fp = _G.FlyPathfinder
  if not (npcName and db) then return false end
@@ -3168,10 +3223,29 @@ QuestAPI.goTake = function(npcName, db, speed)
  end
  if not db.position then db.position = npcPos end
 
- -- Cổng CẤP (bước đầu tiên): kiểm tra cấp TRƯỚC khi bay/nhận
+ -- CỔNG KIỂM TRA CẤP BẮT BUỘC:
+ -- 1. Không nhận quest nếu cấp người chơi chưa đủ (lvlGate < minLevel)
+ -- 2. Không nhận quest nếu minLevel THẤP HƠN cấp tối đa khả dụng của người chơi!
  local lvlGate = QuestAPI.getPlayerLevel()
- if db.minLevel and lvlGate and lvlGate < db.minLevel then
-  QuestAPI.skipUntil[npcName] = os.clock() + 30
+ local maxMin = QuestAPI.getMaxMinLevel()
+ if db.minLevel then
+  if lvlGate and lvlGate < db.minLevel then
+   print(string.format("[QuestAPI] Tu choi NPC '%s' vi chua du cap (%d < %d)", npcName, lvlGate or 0, db.minLevel))
+   QuestAPI.skipUntil[npcName] = os.clock() + 30
+   return false
+  end
+  if maxMin and maxMin > 0 and db.minLevel < maxMin then
+   print(string.format("[QuestAPI] TU CHOI NPC '%s' (minLevel %d) vi thap hon quest cap cao nhat (%d)", npcName, db.minLevel, maxMin))
+   QuestAPI.skipUntil[npcName] = os.clock() + 60
+   return false
+  end
+ end
+
+ -- Kiểm tra quest đã hoàn thành chưa
+ local completed = getCompletedQuests()
+ local questKey = db.quest or ("Help " .. npcName)
+ if completed[questKey] or completed[npcName] then
+  print(string.format("[QuestAPI] Tu choi NPC '%s' vi da hoan thanh", npcName))
   return false
  end
 
@@ -3364,29 +3438,18 @@ QuestAPI.cancelQuest()
     continue
 end
     -- [QUEST THẤP HƠN CẤP TỐI ĐA] Nếu quest hiện tại minLevel < max minLevel khả dụng
-    -- → buộc phải đứng GẦN NPC quest đó (≤ QUEST_NEAR_RADIUS = 3 studs) mới được farm tiếp.
-    -- Nếu xa → hủy quest cũ để nhận quest cấp cao hơn.
+    -- → BẮT BUỘC HỦY NGAY LẬP TỨC để nhận quest đúng cấp cao nhất (tuyệt đối không farm tiếp quest thấp hơn cấp!)
     if Options.AutoQuest.Value and db and db.minLevel then
-     local lvl = QuestAPI.getPlayerLevel()
-     local nowT = os.clock()
-     local maxMin = db.minLevel
-     for npcName2, db2 in pairs(QuestDB) do
-      if db2.position and db2.minLevel and db2.targets and db2.minLevel <= lvl
-       and not (QuestAPI.skipUntil[npcName2] and QuestAPI.skipUntil[npcName2] > nowT) then
-       if db2.minLevel > maxMin then maxMin = db2.minLevel end
-      end
-     end
-     if maxMin > db.minLevel then
-      local myPos = getPlayerPosition()
-      if not myPos or (myPos - db.position).Magnitude > QUEST_NEAR_RADIUS then
-       setAutoFarmStatus("WaitingQuest", string.format(
-        "Quest '%s' (minLevel %d) thấp hơn max %d — xa NPC > %d studs → hủy để lấy quest cao hơn",
-        npcName, db.minLevel, maxMin, QUEST_NEAR_RADIUS))
-       QuestAPI.cancelQuest()
-       QuestAPI.pauseUntil = 0 -- nhận quest mới ngay
-       task.wait(0.5)
-       continue
-      end
+     local maxMin = QuestAPI.getMaxMinLevel()
+     if maxMin and maxMin > 0 and db.minLevel < maxMin then
+      setAutoFarmStatus("WaitingQuest", string.format(
+       "Quest '%s' (minLevel %d) thấp hơn cấp tối đa %d → HỦY NGAY để nhận quest đúng cấp",
+       npcName or "?", db.minLevel, maxMin))
+      QuestAPI.cancelQuest()
+      AutoFarm.hadQuest = false
+      QuestAPI.pauseUntil = 0 -- nhận quest mới ngay
+      task.wait(0.5)
+      continue
      end
     end
     -- [LÊN CẤP → QUEST MỚI] Định kỳ 8s: nếu cấp mới mở khóa NPC quest bậc CAO HƠN
