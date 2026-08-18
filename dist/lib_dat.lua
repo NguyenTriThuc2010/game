@@ -164,7 +164,7 @@ local QuestDB = {
  -- 2. Sandora
  ["Noah"]  = { island = "Sandora", minLevel = 11, targets = "Desert Bandit", count = 7, action = "kill", position = Vector3.new(-1710.6161, 3.9746, -3375.1345) },
  -- 3. Shell's Town
- ["Robert"] = { island = "Shell's Town", minLevel = 20, targets = "Corrupt Marines",  count = 8, action = "kill", position = Vector3.new(-1442.0906, 9.8750, -5098.7837) },
+ ["Robert"] = { island = "Shell's Town", minLevel = 20, targets = "Corrupt Marines",  count = 8, action = "kill", position = Vector3.new(-1444.9070, 9.8750, -5102.1353) },
  ["Kevin"]  = { island = "Shell's Town", minLevel = 25, targets = "Shell's Bandits",  count = 8, action = "kill", position = Vector3.new(-1223.4202, 63.5007, -5189.7456) },
  ["Gozen"]  = { island = "Shell's Town", minLevel = 30, targets = "Axe Hand Logan",   count = 1, action = "kill", position = nil },
  -- NPC quest chưa có thông tin (chỉ mới có tọa độ)
