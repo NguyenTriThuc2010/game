@@ -3189,7 +3189,7 @@ QuestAPI.findNearest = function(excludeName, anyDistance)
 end
 
 -- Bay tới NPC + nhận quest (chỉ nhận quest hợp lệ và đúng cấp cao nhất)
--- Bay tới NPC + nhận quest: BẮT BUỘC ĐỨNG TRƯỚC MẶT NPC CÁCH 2.5 STUDS (chuẩn khoảng cách tương tác)
+-- Bay tới NPC + nhận quest: BẮT BUỘC ĐỨNG TRƯỚC MẶT NPC CÁCH 1.5 STUDS (chuẩn khoảng cách tương tác)
 QuestAPI.goTake = function(npcName, db, speed)
  local fp = _G.FlyPathfinder
  if not (npcName and db) then return false end
@@ -3212,7 +3212,7 @@ QuestAPI.goTake = function(npcName, db, speed)
 
  local questName = db.quest or ("Help " .. npcName)
 
- -- TÍNH TOÁN VỊ TRÍ ĐỨNG: 2.5 STUDS TRƯỚC MẶT NPC
+ -- TÍNH TOÁN VỊ TRÍ ĐỨNG: 1.5 STUDS TRƯỚC MẶT NPC
  local function getStandPos()
   local npcModel = QuestAPI.getNPCModel(npcName, npcPos)
   if npcModel then
@@ -3222,15 +3222,15 @@ QuestAPI.goTake = function(npcName, db, speed)
     local flatLook = Vector3.new(look.X, 0, look.Z)
     if flatLook.Magnitude > 0.1 then
      -- Đứng ngay trước mặt NPC 2.5 studs
-     return npcPos + flatLook.Unit * 2.5
+     return npcPos + flatLook.Unit * 1.5
     end
    end
   end
   local myPos = getPlayerPosition()
-  local diff = (myPos and (myPos - npcPos)) or Vector3.new(0, 0, 2.5)
+  local diff = (myPos and (myPos - npcPos)) or Vector3.new(0, 0, 1.5)
   local flat = Vector3.new(diff.X, 0, diff.Z)
   if flat.Magnitude < 0.1 then flat = Vector3.new(0, 0, 1) end
-  return npcPos + flat.Unit * 2.5
+  return npcPos + flat.Unit * 1.5
  end
 
  local standPos = getStandPos()
@@ -3243,7 +3243,7 @@ QuestAPI.goTake = function(npcName, db, speed)
   if not myPos then return false end
   local d = (myPos - npcPos).Magnitude
   -- Khoảng cách tới NPC nằm trong khoảng 1.6 đến 3.4 studs (chuẩn 2.5 studs, an toàn < 5 studs nhận quest)
-  return d <= 3.4 and d >= 1.6
+  return d <= 2.4 and d >= 0.7
  end
 
  -- Tiếp cận đúng vị trí đứng 2.5 studs
@@ -3281,7 +3281,7 @@ QuestAPI.goTake = function(npcName, db, speed)
   standPos = getStandPos()
   local myPos = getPlayerPosition()
   local d = myPos and (myPos - npcPos).Magnitude or 999
-  if d > 3.5 or d < 1.6 then
+  if d > 2.5 or d < 0.7 then
    local myHrp = getHumanoidRootPart()
    if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
     fp.currentBV.Velocity = (standPos - myHrp.Position).Unit * math.clamp((standPos - myHrp.Position).Magnitude * 5, 8, speed or 75)
