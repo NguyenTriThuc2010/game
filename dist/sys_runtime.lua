@@ -102,7 +102,7 @@ local HEIGHT_LIMIT            = 7       -- neu cao hon muc nay la dang bay
 local ATTACK_RANGE            = 10      -- server nhận damage trong ~10 studs (hover trên đầu target cao ~8-9)
 local ATTACK_RANGE_SOFT       = 9.5     -- ngưỡng an toàn khi gửi damage (tránh mép bị từ chối)
 
-local BOOST_HEIGHT            = 500     -- do cao muc tieu khi ne vat can (studs)
+local BOOST_HEIGHT            = 20      -- do cao muc tieu khi vuot vat can nhe (studs)     -- do cao muc tieu khi ne vat can (studs)
 local BOOST_TOLERANCE         = 1       -- sai so cho phep khi dat do cao (studs)
 local VERTICAL_BOOST_SPEED    = 60      -- toc do len/xuong khi chuyen trang thai (studs/s)
 
@@ -2474,12 +2474,14 @@ end
 local function shouldFlyAtBoostHeight(hrp, horizontalDir, remainingDistance)
  if not hrp then return false end
 
+ -- Chi boost khi co vat can dung thang CHAN PHIA TRUOC o tam nguc/dau (khong boost vi cam dau vao dat)
  local hit = castRayForward(hrp, horizontalDir, OBSTACLE_CHECK_DISTANCE)
- if hit then
+ if hit and hit.Instance and hit.Instance.CanCollide then
+  -- Neu chi la dat duoi chan (Normal huong len) thi khong boost vo ly
+  if hit.Normal and hit.Normal.Y > 0.7 then
+   return false
+  end
   return true, "Obstacle"
- end
- if remainingDistance and remainingDistance > FAR_DISTANCE_THRESHOLD then
-  return true, "FarDistance"
  end
  return false
 end
@@ -2830,12 +2832,12 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
       desiredY = bridgeY
       Fly.bridgeActive = true
      else
-      desiredY = BASE_Y + BOOST_HEIGHT
+      desiredY = terrainFloor + 12
       Fly.bridgeActive = false
      end
     end
    else
-    desiredY = BASE_Y + BOOST_HEIGHT
+    desiredY = terrainFloor + 12
     Fly.bridgeActive = false
    end
   else
@@ -3187,6 +3189,7 @@ QuestAPI.findNearest = function(excludeName, anyDistance)
 end
 
 -- Bay tới NPC + nhận quest (chỉ nhận quest hợp lệ và đúng cấp cao nhất)
+-- Bay tới NPC + nhận quest: BẮT BUỘC ĐỨNG CÁCH NPC ĐÚNG 4 STUDS (không đứng sát / đè lên NPC)
 QuestAPI.goTake = function(npcName, db, speed)
  local fp = _G.FlyPathfinder
  if not (npcName and db) then return false end
@@ -3195,55 +3198,64 @@ QuestAPI.goTake = function(npcName, db, speed)
  if not db.position then db.position = npcPos end
 
  -- CỔNG KIỂM TRA CẤP BẮT BUỘC:
- -- 1. Không nhận quest nếu cấp người chơi chưa đủ (lvlGate < minLevel)
- -- 2. Không nhận quest nếu minLevel THẤP HƠN cấp tối đa khả dụng của người chơi!
  local lvlGate = QuestAPI.getPlayerLevel()
  local maxMin = QuestAPI.getMaxMinLevel()
  if db.minLevel then
-  if lvlGate and lvlGate < db.minLevel then
-   return false
-  end
-  if maxMin and maxMin > 0 and db.minLevel < maxMin then
-   return false
-  end
+  if lvlGate and lvlGate < db.minLevel then return false end
+  if maxMin and maxMin > 0 and db.minLevel < maxMin then return false end
  end
 
  -- Kiểm tra quest đã hoàn thành chưa
  local completed = getCompletedQuests()
  local questKey = db.quest or ("Help " .. npcName)
- if completed[questKey] or completed[npcName] then
-  return false
- end
+ if completed[questKey] or completed[npcName] then return false end
 
- -- Tên quest cần nhận
  local questName = db.quest or ("Help " .. npcName)
 
- -- Bay thẳng tới NPC quest
- if fp then fp.FlyTo(npcPos, speed or 75, nil, "quest") end
-
- local function inRange()
+ -- TÍNH TOÁN VỊ TRÍ ĐỨNG CÁCH NPC ĐÚNG 4 STUDS
+ local function getStandPos()
   local myPos = getPlayerPosition()
-  return (myPos and (myPos - npcPos).Magnitude <= QUEST_TAKE_RANGE) or false
+  local diff = (myPos and (myPos - npcPos)) or Vector3.new(0, 0, 4)
+  local flat = Vector3.new(diff.X, 0, diff.Z)
+  if flat.Magnitude < 0.1 then flat = Vector3.new(0, 0, 1) end
+  return npcPos + flat.Unit * 4.0
  end
 
- -- Ép tới gần NPC trước khi gọi remote
+ local standPos = getStandPos()
+
+ -- Bay tới vị trí đứng 4 studs
+ if fp then fp.FlyTo(standPos, speed or 75, nil, "quest") end
+
+ local function inStandRange()
+  local myPos = getPlayerPosition()
+  if not myPos then return false end
+  local d = (myPos - npcPos).Magnitude
+  -- Khoảng cách tới NPC nằm trong khoảng 3.0 đến 4.8 studs (an toàn < 5 studs để server nhận)
+  return d <= 4.8 and d >= 2.5
+ end
+
+ -- Tiếp cận đúng vị trí đứng 4 studs
  local t0 = os.clock()
  while os.clock() - t0 < 8 do
   if not AutoFarm.active then return false end
-  if inRange() then break end
+  if inStandRange() then break end
+  standPos = getStandPos()
   local myHrp = getHumanoidRootPart()
   if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
-   local d = (npcPos - myHrp.Position).Magnitude
-   fp.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, speed or 75)
+   local d = (standPos - myHrp.Position).Magnitude
+   if d > 0.5 then
+    fp.currentBV.Velocity = (standPos - myHrp.Position).Unit * math.clamp(d * 5, 8, speed or 75)
+   else
+    fp.currentBV.Velocity = Vector3.new(0, 0, 0)
+    break
+   end
   end
   task.wait(0.15)
  end
 
- if not inRange() or QuestAPI.waterBelow15(nil) == true then
-  return false
- end
+ if QuestAPI.waterBelow15(nil) == true then return false end
 
- -- Khi đã đứng cạnh NPC, phát hiện tên quest thật từ model nếu có
+ -- Phát hiện tên quest thật từ model nếu có
  local npcModel = QuestAPI.getNPCModel(npcName, npcPos)
  if npcModel then
   local discovered, src = QuestAPI.discoverQuestName(npcName, db, npcModel)
@@ -3254,19 +3266,15 @@ QuestAPI.goTake = function(npcName, db, speed)
 
  for attempt = 1, 2 do
   if not AutoFarm.active then return false end
-  if not inRange() then
-   local tp = os.clock()
-   while os.clock() - tp < 3 do
-    if not inRange() then
-     local myHrp = getHumanoidRootPart()
-     if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
-      local d = (npcPos - myHrp.Position).Magnitude
-      fp.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, speed or 75)
-     end
-     task.wait(0.15)
-    else break end
+  standPos = getStandPos()
+  local myPos = getPlayerPosition()
+  local d = myPos and (myPos - npcPos).Magnitude or 999
+  if d > 4.9 or d < 2.5 then
+   local myHrp = getHumanoidRootPart()
+   if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
+    fp.currentBV.Velocity = (standPos - myHrp.Position).Unit * math.clamp((standPos - myHrp.Position).Magnitude * 5, 8, speed or 75)
    end
-   if not inRange() then return false end
+   task.wait(0.2)
   end
 
   QuestAPI.takeQuest(questName)
