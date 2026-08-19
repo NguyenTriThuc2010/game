@@ -206,7 +206,7 @@ RunService.Heartbeat:Connect(function(dt)
  end
  if not Fly.flyGyro or not Fly.flyGyro.Parent then
   local gyro = Instance.new("BodyGyro")
-  gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
+  gyro.MaxTorque = Vector3.new(0,1,1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
   gyro.P         = 3000
   gyro.D         = 100
   gyro.CFrame    = hrp.CFrame
@@ -630,10 +630,11 @@ local function hasBlackLeg()
  return false
 end
 
---- Tru stamina bằng Sky Walk — CHỈ khi có BlackLeg trong túi đồ (bỏ Dash/takestam)
---- Tra ve false neu khong the tru (khong co BlackLeg → nên dừng bay)
+--- Tru stamina bằng Sky Walk — CHỈ khi có cách tiêu hao stamina hợp pháp
+--- (BlackLeg trong túi đồ, hoặc FightingStyle Rokushiki/Geppo).
+--- Tra ve false neu khong the tru (→ nên dừng bay cao)
 local function drainStamina()
- if not hasBlackLeg() then return false end
+ if not (_G.hasStaminaDrainAbility and _G.hasStaminaDrainAbility()) then return false end
  pcall(callSkyWalk)
  return true
 end
@@ -1541,20 +1542,16 @@ local function setFaceMode(active, targetGetter)
 end
 
 -- Xoay nhân vật nhìn về target qua BodyGyro only (không ghi hrp.CFrame — anti-cheat)
--- tiltMode = "dive": body nằm ngang úp mặt xuống target — CHỈ đổi gyro,
--- lookCF trả về vẫn là bản thẳng (giữ damageArgs[6] như cũ cho server)
+-- tiltMode đã bỏ ("dive" = lật người nằm ngang bị XÓA theo yêu cầu) — luôn giữ người đứng
 local function faceTowardPosition(hrp, targetPos, gyro, tiltMode)
     if not (hrp and targetPos) then return hrp and hrp.CFrame or CFrame.new() end
-
-    -- +90° quanh trục phải: đầu (local +Y) xoay về hướng nhìn (+Z) → nằm ngang úp mặt
-    local diveTilt = (tiltMode == "dive") and CFrame.Angles(math.pi / 2, 0, 0) or nil
 
     -- FaceLook override: hướng mặt thẳng vào target (nghiêng lên/xuống theo 3D)
     if FaceLook.active and FaceLook.targetGetter then
         local t = FaceLook.targetGetter()
         if t then
             local lookCF = CFrame.lookAt(hrp.Position, t)
-            local setCF = diveTilt and (lookCF * diveTilt) or lookCF
+            local setCF = lookCF
             if gyro and gyro.Parent then
                 gyro.CFrame = setCF
             elseif FlyPathfinder and FlyPathfinder.currentGyro and FlyPathfinder.currentGyro.Parent then
@@ -1569,7 +1566,7 @@ local function faceTowardPosition(hrp, targetPos, gyro, tiltMode)
     local flat = Vector3.new(targetPos.X, hrp.Position.Y, targetPos.Z)
     local lookAt = ((flat - hrp.Position).Magnitude > 0.15) and flat or targetPos
     local lookCF = CFrame.lookAt(hrp.Position, lookAt)
-    local setCF = diveTilt and (lookCF * diveTilt) or lookCF
+    local setCF = lookCF
     if gyro and gyro.Parent then
         gyro.CFrame = setCF
     elseif FlyPathfinder and FlyPathfinder.currentGyro and FlyPathfinder.currentGyro.Parent then
@@ -2399,15 +2396,76 @@ local SEA_LOW_FLY_MARGIN = 2   -- bay sát mặt nước: dưới ngưỡng watc
 local drainOkCache = { value = nil, at = 0 }
 local DRAIN_CACHE_SECONDS = 2
 
---- Có cách tiêu hao stamina không (BlackLeg → Sky Walk)? Cache 2s — hasBlackLeg() đọc inventory JSON đắt
+--- Có cách tiêu hao stamina khi bay cao không (BlackLeg → Sky Walk / Rokushiki → Geppo)?
+--- Cache 2s — hasBlackLeg() đọc inventory JSON đắt
+local hasStaminaDrainAbility = function()
+ if hasBlackLeg() then return true end
+ local ok, style = pcall(function() return getFightingStyle() end)
+ if ok and type(style) == "string" then
+  local s = string.lower(style)
+  return s:find("rokushiki", 1, true) ~= nil or s:find("geppo", 1, true) ~= nil
+ end
+ return false
+end
+
 local canDrainStamina = function()
  local nowT = os.clock()
  if drainOkCache.value == nil or nowT - drainOkCache.at > DRAIN_CACHE_SECONDS then
-  drainOkCache.value = hasBlackLeg()
+  drainOkCache.value = hasStaminaDrainAbility()
   drainOkCache.at = nowT
  end
  return drainOkCache.value == true
 end
+
+-- ================== FLIGHT MODE: SAFE / RISK ==================
+-- SAFE : không Geppo + không BlackLeg → KHÔNG tiêu hao được stamina → luật game
+--        chỉ cho bay cao ≤ 15 studs. Bám địa hình, vượt vật cản xong phải HẠ NGAY
+--        về độ cao an toàn (không lơ lửng trên cao — tốn thời gian + dễ bị watchdog).
+-- RISK : có Geppo / BlackLeg → drain được stamina → được bay cao (SkyCruise 60+,
+--        A* 3D tầng 8/20/45, vượt tường bằng cầu trời) nhưng phải tick drain đều.
+local FlyMode = { state = "SAFE", changedAt = 0 }
+_G.FlyMode = FlyMode
+local function evaluateFlyMode()
+ return canDrainStamina() and "RISK" or "SAFE"
+end
+local function refreshFlyMode()
+ local newMode = evaluateFlyMode()
+ if newMode ~= FlyMode.state then
+  local old = FlyMode.state
+  FlyMode.state = newMode
+  FlyMode.changedAt = os.clock()
+  print(string.format("[FlyMode] %s → %s (%s)", old, newMode,
+   newMode == "RISK" and "có Geppo/BlackLeg → bay cao" or "không drain → bám thấp"))
+ end
+ return FlyMode.state
+end
+
+--- Giới hạn tốc độ hệ thống theo FlyMode:
+--- SAFE (không Geppo/BlackLeg) → tối đa 70 studs/s (KHÔNG vượt — watchdog chụp tốc độ cao)
+--- RISK (có Geppo/BlackLeg)     → tối đa 300 studs/s
+local function maxFlightSpeed()
+ return FlyMode.state == "SAFE" and 70 or 300
+end
+_G.maxFlightSpeed = maxFlightSpeed
+
+--- [FlyMode] Giới hạn độ cao SAFE: tối đa 15 studs trên mặt đất/nước (càng thấp càng an toàn),
+--- thấp nhất -1 stud (không cắm đầu xuống đất). RISK: không giới hạn độ cao.
+--- Trả về velocity đã clamp Y theo trần/sàn hợp lệ.
+local function clampSafeAltitude(hrp, vel)
+ if FlyMode.state ~= "SAFE" then return vel end
+ local gy = groundOrSeaBelow(hrp.Position)
+ if not gy then return vel end
+ local height = hrp.Position.Y - gy
+ if height > 15 then
+  local dy = (gy + 15 - hrp.Position.Y) * 3
+  return Vector3.new(vel.X, math.max(dy, vel.Y), vel.Z)
+ elseif height < -1 then
+  local dy = (gy - 1 - hrp.Position.Y) * 3
+  return Vector3.new(vel.X, math.min(dy, vel.Y), vel.Z)
+ end
+ return vel
+end
+_G.clampSafeAltitude = clampSafeAltitude
 
 --- CHẾ ĐỘ BAY THẤP TRÊN BIỂN: trả về mặt nước Y nếu bên dưới là BIỂN và KHÔNG có cách tiêu hao
 --- stamina (→ phải hạ sát mặt nước). Trả nil → bay bình thường (đất / có BlackLeg).
@@ -2426,7 +2484,7 @@ local function createFlyPhysicsObjects(hrp)
  bv.Parent   = hrp
 
  local gyro = Instance.new("BodyGyro")
- gyro.MaxTorque = Vector3.new(1, 1, 1) * math.huge
+ gyro.MaxTorque = Vector3.new(0, 1, 1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
  gyro.P         = 3000
  gyro.D         = 100
  gyro.CFrame    = hrp.CFrame
@@ -2587,6 +2645,7 @@ end
 
 startManualFly = function()
  if Status.Fly then stopFly() end
+ refreshFlyMode()
  local ok, hrp, humanoid = validateAndPrepareFly()
  if not ok then return end
 
@@ -2628,18 +2687,20 @@ startManualFly = function()
    bv.Parent   = hrp
    Fly.flyBV   = bv
   end
-  if not gyro or not gyro.Parent then
-   gyro = Instance.new("BodyGyro")
-gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
-   gyro.P         = 3000
-   gyro.D         = 100
-   gyro.CFrame    = hrp.CFrame
-   gyro.Parent    = hrp
-   Fly.flyGyro    = gyro
-  end
+   if not gyro or not gyro.Parent then
+    gyro = Instance.new("BodyGyro")
+gyro.MaxTorque = Vector3.new(0,1,1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
+    gyro.P         = 3000
+    gyro.D         = 100
+    gyro.CFrame    = hrp.CFrame
+    gyro.Parent    = hrp
+    Fly.flyGyro    = gyro
+   end
 
-  local camCFrame = workspace.CurrentCamera.CFrame
-  local velocity, moveDir = calculateManualHorizontalVelocity(camCFrame, Fly.flySpeed)
+   local camCFrame = workspace.CurrentCamera.CFrame
+  -- [FlyMode] Giới hạn tốc độ hệ thống: SAFE ≤ 70, RISK ≤ 300
+  local effFlySpeed = math.min(Fly.flySpeed, maxFlightSpeed())
+  local velocity, moveDir = calculateManualHorizontalVelocity(camCFrame, effFlySpeed)
 
   -- [MIN HEIGHT] San dong MỖI FRAME: mat dat/nuoc that duoi chan + 2 studs
   -- (IgnoreWater=false de bat ca mat nuoc); san TUYET DOI = BASE_Y (-2.7) —
@@ -2689,14 +2750,15 @@ gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
   Fly.desiredY = minY
 
   if velocity.Magnitude > 0 then
-   bv.Velocity = velocity + Vector3.new(0, yVelocity, 0)
+   -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+   bv.Velocity = clampSafeAltitude(hrp, velocity + Vector3.new(0, yVelocity, 0))
    -- Xoay nhan vat theo huong di chuyen ngang (bo qua Y de khong nghieng)
    local flatDir = Vector3.new(moveDir.X, 0, moveDir.Z)
    if flatDir.Magnitude > 0.01 then
     gyro.CFrame = CFrame.new(hrp.Position, hrp.Position + flatDir)
    end
   else
-   bv.Velocity = Vector3.new(0, yVelocity, 0)
+   bv.Velocity = clampSafeAltitude(hrp, Vector3.new(0, yVelocity, 0))
   end
 
   -- Drain stamina: ngang (lien tuc) + doc (them khi leo/ha)
@@ -2721,6 +2783,7 @@ end
 
 startAutoFly = function(targetGetter, onArrive, arriveDistance)
  if Status.Fly then stopFly() end
+ refreshFlyMode()
  arriveDistance = arriveDistance or 4
 
  local ok, hrp, humanoid = validateAndPrepareFly()
@@ -2762,15 +2825,15 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
    bv.Parent   = hrp
    Fly.flyBV   = bv
   end
-  if not gyro or not gyro.Parent then
-   gyro = Instance.new("BodyGyro")
-   gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
-   gyro.P         = 3000
-   gyro.D         = 100
-   gyro.CFrame    = hrp.CFrame
-   gyro.Parent    = hrp
-   Fly.flyGyro    = gyro
-  end
+if not gyro or not gyro.Parent then
+    gyro = Instance.new("BodyGyro")
+    gyro.MaxTorque = Vector3.new(0,1,1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
+    gyro.P         = 3000
+    gyro.D         = 100
+    gyro.CFrame    = hrp.CFrame
+    gyro.Parent    = hrp
+    Fly.flyGyro    = gyro
+   end
 
   local targetPos = targetGetter()
   if not targetPos then
@@ -2779,8 +2842,9 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
   end
 
   -- Tinh velocity ngang
+  local effFlySpeed = math.min(Fly.flySpeed, maxFlightSpeed())
   local horizVelocity, horizontalDir, flatDistance =
-   calculateAutoHorizontalVelocity(hrp.Position, targetPos, arriveDistance, Fly.flySpeed)
+   calculateAutoHorizontalVelocity(hrp.Position, targetPos, arriveDistance, effFlySpeed)
 
   if horizontalDir then
    -- Dang bay ve phia muc tieu -> xoay nhan vat theo huong ngang
@@ -2832,12 +2896,23 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
       desiredY = bridgeY
       Fly.bridgeActive = true
      else
-      desiredY = terrainFloor + 12
+      -- [FlyMode] SAFE (không Geppo/BlackLeg): cấm vọt cao bất hợp pháp →
+      -- giữ sát mặt đất (≤ ngưỡng watchdog 15)
+      if FlyMode.state == "SAFE" then
+       desiredY = terrainFloor
+      else
+       desiredY = terrainFloor + 12
+      end
       Fly.bridgeActive = false
      end
     end
    else
-    desiredY = terrainFloor + 12
+    -- [FlyMode] SAFE: không vọt cao bất hợp pháp → giữ sát mặt đất
+    if FlyMode.state == "SAFE" then
+     desiredY = terrainFloor
+    else
+     desiredY = terrainFloor + 12
+    end
     Fly.bridgeActive = false
    end
   else
@@ -2863,7 +2938,8 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
   local vertVelocity, isMovingVertically = calculateVerticalVelocity(hrp.Position.Y, desiredY)
 
   -- Ap dung velocity tong hop
-  bv.Velocity = horizVelocity + Vector3.new(0, vertVelocity, 0)
+  -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+  bv.Velocity = clampSafeAltitude(hrp, horizVelocity + Vector3.new(0, vertVelocity, 0))
 
   -- Drain stamina: ngang + doc rieng biet
   -- BIỂN + không drain được stamina (không BlackLeg) → bỏ drain (bay thấp sát nước là hợp lệ)
@@ -4732,6 +4808,17 @@ RunService.Heartbeat:Connect(function()
         return
     end
 
+    -- [FlyMode] SAFE: không có cách tiêu hao → bay cao > 15 là BẤT HỢP PHÁP NGAY
+    -- (không chờ stamina-freeze 3s) — "không delay khi check trạng thái bay quá độ cao ở SAFE".
+    if FlyMode.state == "SAFE" then
+        staminaWatch.lastValue = nil
+        cancelFlightByWatchdog(string.format(
+            "SAFE bay cao %.0f studs (>%d) — HỦY NGAY (không drain được stamina)",
+            height, FLIGHT_HEIGHT_MIN
+        ))
+        return
+    end
+
     local stamFolder = Stats and Stats:FindFirstChild("Stats")
     local stam = stamFolder and stamFolder:FindFirstChild("Stamina")
     if not stam then return end
@@ -4752,8 +4839,8 @@ end)
 
 -- ================== POSE PIN (GHIM TƯ THẾ) ==================
 -- Game dựng thẳng nhân vật khi chạy anim swing (root motion) → ghim lại MỖI FRAME
--- bằng BodyGyro (không ghi hrp.CFrame — anti-cheat). Chạy độc lập với combat loop
--- nên trong lúc callAttack bận chém vẫn giữ được tư thế nằm ngang.
+-- bằng BodyGyro (không ghi hrp.CFrame — anti-cheat). Chạy độc lập với combat loop.
+-- Tư thế nằm ngang (dive) đã XÓA theo yêu cầu — luôn đứng thẳng.
 local PosePin = { active = false, dive = false, targetGetter = nil, lastUpdate = 0 }
 local function setPosePin(active, dive, targetGetter)
     PosePin.active = active
@@ -4774,7 +4861,6 @@ RunService.Heartbeat:Connect(function()
     local t = PosePin.targetGetter and PosePin.targetGetter()
     if not (gyro and gyro.Parent and hrp and t) then return end
     local cf = CFrame.lookAt(hrp.Position, t)
-    if PosePin.dive then cf = cf * CFrame.Angles(math.pi / 2, 0, 0) end
     gyro.CFrame = cf
 end)
 
@@ -5199,6 +5285,92 @@ local function computeTerrainFollowPath(startPos, targetPos, ignoreInstances)
 end
 
 -- ==============================================================================
+--  OBSTACLE-CROSSED DESCENT — phát hiện "đã vượt xong vật cản → hạ về độ cao an toàn"
+--  FlyPathfinder (Smart3D/SkyCruise) CHƯA có state này như legacy Fly (bridgeActive):
+--  sau khi leo tường/cây, nó cứ bay lơ lửng trên cao (tốn stamina + watchdog dễ nghi).
+--  Giải pháp: theo dõi wasBlocked → clear. Khi tia tới target từng bị chặn rồi
+--  THÔNG TRỞ LẠI = đã qua vật cản → bật phase DESCEND tới độ cao an toàn
+--  (SAFE: terrainFloor + margin; RISK: giữ nguyên nếu vẫn cần cao cho chặng tới).
+local ObDescent = {
+    wasBlocked  = false,  -- tia tới target đang bị chặn bởi tường (đang vượt)
+    descending  = false,  -- đang trong phase hạ xuống độ cao an toàn
+    safeY       = nil,    -- độ cao an toàn cần hạ tới
+    descendUntil= 0,      -- thời điểm kết thúc hạ (có thể duy trì vài giây)
+    lastCheck   = 0,      -- throttle raycast check (tốn)
+}
+
+local OBSTACLE_DESCEND_CHECK_INTERVAL = 0.25
+local OBSTACLE_DESCEND_HOLD_SECONDS    = 3
+
+--- Kiểm tra mỗi frame: đã vượt xong vật cản chưa → trả về desiredY an toàn (hoặc nil)
+--- Chỉ chạy raycast 4 lần/giây (interval), giữa các lần dùng cache → không lag
+local function getObstacleDescendY(hrpPos, targetPos, targetModel)
+    if not (hrpPos and targetPos) then return nil end
+    local now = os.clock()
+
+    -- Đang trong phase hạ (hold) → giữ nguyên safeY tới hết hold
+    if ObDescent.descending then
+        if now < ObDescent.descendUntil then
+            return ObDescent.safeY
+        end
+        ObDescent.descending = false
+        ObDescent.safeY = nil
+        return nil
+    end
+
+    -- Throttle raycast: không check mỗi frame
+    if now - ObDescent.lastCheck < OBSTACLE_DESCEND_CHECK_INTERVAL then
+        return nil
+    end
+    ObDescent.lastCheck = now
+
+    local blocked = isSeparatedByThickWall(hrpPos, targetPos, targetModel, true)
+    if blocked then
+        -- Vẫn bị chắn: nhớ đang vượt
+        ObDescent.wasBlocked = true
+        return nil
+    end
+
+    -- Tia THÔNG trở lại sau khi từng bị chắn → ĐÃ VƯỢT XONG vật cản
+    if ObDescent.wasBlocked then
+        ObDescent.wasBlocked = false
+        ObDescent.descending = true
+        ObDescent.descendUntil = now + OBSTACLE_DESCEND_HOLD_SECONDS
+
+        -- Độ cao an toàn: mặt đất/nước dưới chân + margin (SAFE)
+        local gy, isSea = groundOrSeaBelow(hrpPos)
+        local safeY
+        if isSea then
+            safeY = gy + SEA_LOW_FLY_MARGIN
+        else
+            safeY = gy + TERRAIN_FOLLOW_MARGIN
+        end
+        ObDescent.safeY = safeY
+
+        -- RISK: nếu target còn XA (cần giữ cao cho chặng sau) thì không ép hạ sát đất,
+        -- chỉ hạ về mức tối thiểu hợp pháp khi ở mode SAFE
+        local mode = (canDrainStamina() and "RISK") or "SAFE"
+        if mode == "RISK" and ObDescent.safeY then
+            local distToTarget = (hrpPos - targetPos).Magnitude
+            if distToTarget > 150 then
+                -- Còn xa: hạ về độ cao bay cao bình thường (không sát đất)
+                ObDescent.safeY = math.max(ObDescent.safeY, hrpPos.Y - 30)
+            end
+        end
+        print(string.format("[Fly] Đã vượt vật cản → hạ về y=%.1f (%s)", ObDescent.safeY, mode))
+        return ObDescent.safeY
+    end
+    return nil
+end
+
+local function resetObstacleDescent()
+    ObDescent.wasBlocked = false
+    ObDescent.descending = false
+    ObDescent.safeY = nil
+    ObDescent.descendUntil = 0
+end
+
+-- ==============================================================================
 --  FLY3D CHUNK — A* 3D tìm đường bay NHANH NHẤT quanh vật cản (cây/tường/đồi)
 --  Chỉ tính ≤ FLY3D_CHUNK_WPS waypoint (5) mỗi lần tới sub-goal (cách ~70 studs) —
 --  hết 5 waypoint lại tính chunk mới → không build cả đường dài 1 lúc → KHÔNG LAG.
@@ -5405,7 +5577,7 @@ function FlyPathfinder.SetupPhysics()
     if not FlyPathfinder.currentGyro or not FlyPathfinder.currentGyro.Parent then
         local gyro = Instance.new("BodyGyro")
         gyro.Name = "FlyPathfinder_Gyro"
-        gyro.MaxTorque = Vector3.new(1, 1, 1) * math.huge
+        gyro.MaxTorque = Vector3.new(0, 1, 1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
         gyro.P = 5000
         gyro.D = 800
         gyro.CFrame = hrp.CFrame
@@ -5484,16 +5656,20 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
     FlyPathfinder.ownerToken = (FlyPathfinder.ownerToken or 0) + 1
     local myToken = FlyPathfinder.ownerToken
 
+    -- [FlyMode] Cập nhật trạng thái SAFE/RISK cho chuyến bay này
+    refreshFlyMode()
+    resetObstacleDescent()
+
     FlyPathfinder.isNavigating = true
     FlyPathfinder.SetupPhysics()
 
-    local speed = tonumber(customSpeed) or (Options and Options.ImpelSpeed and tonumber(Options.ImpelSpeed.Value)) or FlyPathfinder.Config.FlySpeed
+    local speed = math.min(tonumber(customSpeed) or (Options and Options.ImpelSpeed and tonumber(Options.ImpelSpeed.Value)) or FlyPathfinder.Config.FlySpeed, maxFlightSpeed())
     local startPos = hrp.Position
     local totalDist = (targetPos - startPos).Magnitude
 
     FlyPathfinder.currentTask = taskName
-    print(string.format("[Fly] TASK=%s mode=%s → (%.1f, %.1f, %.1f) | dist=%.0f studs",
-        taskName, customMode or "auto", targetPos.X, targetPos.Y, targetPos.Z, totalDist))
+    print(string.format("[Fly] TASK=%s mode=%s | FlyMode=%s → (%.1f, %.1f, %.1f) | dist=%.0f studs",
+        taskName, customMode or "auto", FlyMode.state, targetPos.X, targetPos.Y, targetPos.Z, totalDist))
     local ignoreList = { Character }
 
     local stamTimer = 0
@@ -5518,6 +5694,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
         local safeDir, _ = resolveCollisionFreeDir(hrp.Position, moveDir, ignoreList, nil)
         local vel = safeDir * curSpeed
         vel = sanitizeVelocity(hrp.Position, vel, ignoreList)
+        -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+        vel = clampSafeAltitude(hrp, vel)
         if FlyPathfinder.currentBV and FlyPathfinder.currentBV.Parent then
             FlyPathfinder.currentBV.Velocity = vel
         end
@@ -5535,7 +5713,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
     local directHit  = castSolidRay(startPos, (targetPos - startPos), rp)
 
     local mode = customMode
-    local noDrain = not canDrainStamina() -- không BlackLeg → luật game chỉ cho bay cao ≤ 15 studs
+    -- [FlyMode] noDrain = không Geppo + không BlackLeg → luật game chỉ cho bay cao ≤ 15 studs
+    local noDrain = FlyMode.state == "SAFE"
     if not mode then
         -- Địa hình không bằng phẳng (đồi/dốc) hoặc đích cao hơn → Smart3D:
         -- PathfindingService nhận diện con đường dốc, thay vì SkyCruise vọt lên trời
@@ -5567,23 +5746,57 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
         local totalWps = 0
         local subGoalIdx = 0
         local isLastChunk = false
-        local function replanChunk()
+        -- [FlyMode] LOOKAHEAD: tính TRƯỚC chunk kế ngay khi sắp hết chunk hiện tại →
+        -- không dừng/khựng giữa các chunk (bay liền mạch, không chờ A* chạy xong).
+        local nextChunkWps, nextChunkLast, nextChunkIdx = nil, false, 0
+
+        local function computeChunk(idx)
          local hrpN = getHumanoidRootPart()
-         if not hrpN then return false end
-         subGoalIdx = subGoalIdx + 1
+         if not hrpN then return nil, false end
          local dx = targetPos.X - startPos.X
          local dz = targetPos.Z - startPos.Z
          local hDist = math.max(1, math.sqrt(dx * dx + dz * dz))
-         local frac = math.min(1, (subGoalIdx * FLY3D_CHUNK_DIST) / hDist)
+         local frac = math.min(1, (idx * FLY3D_CHUNK_DIST) / hDist)
          local sg = Vector3.new(startPos.X + dx * frac, hrpN.Position.Y, startPos.Z + dz * frac)
-         isLastChunk = frac >= 1
-         if isLastChunk then sg = targetPos end
-         waypoints = computeFly3DChunk(hrpN.Position, sg, ignoreList, noDrain)
-         wpIndex = 1
-         totalWps = #waypoints
-         if totalWps == 0 then waypoints = { sg } totalWps = 1 end
-         return true
+         local last = frac >= 1
+         if last then sg = targetPos end
+         local wps = computeFly3DChunk(hrpN.Position, sg, ignoreList, noDrain)
+         if #wps == 0 then wps = { sg } end
+         return wps, last
         end
+
+        local function applyChunk(wps, last, idx)
+         waypoints = wps
+         totalWps = #waypoints
+         isLastChunk = last
+         subGoalIdx = idx
+         wpIndex = 1
+        end
+
+        local function replanChunk()
+         subGoalIdx = subGoalIdx + 1
+         local wps, last = computeChunk(subGoalIdx)
+         applyChunk(wps, last, subGoalIdx)
+         nextChunkWps = nil
+        end
+
+        -- Precompute chunk kế TRƯỚC khi hết chunk hiện tại (chạy 1 lần/chunk)
+        local function ensureNextChunk()
+         if isLastChunk or nextChunkWps then return end
+         local wps, last = computeChunk(subGoalIdx + 1)
+         nextChunkWps, nextChunkLast, nextChunkIdx = wps, last, subGoalIdx + 1
+        end
+
+        -- Chuyển sang chunk kế: dùng bản đã tính sẵn (không block), fallback tính mới
+        local function advanceChunk()
+         if nextChunkWps then
+          applyChunk(nextChunkWps, nextChunkLast, nextChunkIdx)
+          nextChunkWps = nil
+         else
+          replanChunk()
+         end
+        end
+
         local startTime = os.clock()
         local timeout = math.clamp((totalDist / math.max(speed, 50)) * 2.5 + 6, 5, 45)
 
@@ -5616,8 +5829,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
                     arrived = true
                     break
                 end
-                -- Hết chunk → tìm chunk kế (≤5 waypoint, đồ thị nhỏ → repath nhanh, không lag)
-                replanChunk()
+                -- Hết chunk → chuyển sang chunk kế ĐÃ tính sẵn (không block, không khựng)
+                advanceChunk()
                 if wpIndex > totalWps then break end
             end
 
@@ -5631,6 +5844,11 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
                 end
             end
 
+            -- [FlyMode] Sắp hết chunk hiện tại → tính sẵn chunk kế (bay liền mạch)
+            if not isLastChunk and wpIndex >= totalWps - 1 then
+                ensureNextChunk()
+            end
+
             local diff = curWp - hrp.Position
             local dist = diff.Magnitude
 
@@ -5641,7 +5859,7 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
                         arrived = true
                         break
                     end
-                    replanChunk()
+                    advanceChunk()
                     if wpIndex > totalWps then break end
                 end
                 curWp = waypoints[wpIndex]
@@ -5703,6 +5921,26 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
                 lastAvoidSide = side
             end
 
+            -- [FlyMode] Đã vượt xong vật cản → hạ về độ cao an toàn (không lơ lửng trên cao)
+            -- SAFE: hạ NGAY về terrainFloor + margin; RISK: hạ từ từ (không vọt)
+            if not inEscape then
+                local odY = getObstacleDescendY(hrp.Position, targetPos, nil)
+                if odY and hrp.Position.Y > odY + 2 then
+                    local flatDir = Vector3.new(moveDir.X, 0, moveDir.Z)
+                    if flatDir.Magnitude < 0.05 then
+                        flatDir = Vector3.new((targetPos - hrp.Position).X, 0, (targetPos - hrp.Position).Z)
+                    end
+                    local yDiff = hrp.Position.Y - odY
+                    local yBias
+                    if FlyMode.state == "SAFE" then
+                        yBias = -math.min(0.9, yDiff / 60)     -- hạ nhanh, hợp pháp (≤15 studs)
+                    else
+                        yBias = -math.min(0.5, yDiff / 90)     -- RISK: hạ từ từ, không vọt
+                    end
+                    moveDir = (flatDir.Unit * 0.6 + Vector3.new(0, yBias, 0)).Unit
+                end
+            end
+
             local curSpeed = (wpIndex == totalWps) and math.clamp(dist * 5, 10, speed) or speed
             if reverseHits >= 2 then
                 curSpeed = math.min(curSpeed, 35)
@@ -5713,6 +5951,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
 
             local vel = moveDir * curSpeed
             vel = sanitizeVelocity(hrp.Position, vel, ignoreList)
+            -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+            vel = clampSafeAltitude(hrp, vel)
             if FlyPathfinder.currentBV then
                 FlyPathfinder.currentBV.Velocity = vel
             end
@@ -5805,6 +6045,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
             local curSpeed = math.clamp(dist * 4.5, 14, speed)
             local vel = moveDir * curSpeed
             vel = sanitizeVelocity(hrp.Position, vel, ignoreList)
+            -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+            vel = clampSafeAltitude(hrp, vel)
             if FlyPathfinder.currentBV then
                 FlyPathfinder.currentBV.Velocity = vel
             end
@@ -5891,6 +6133,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
             end
             local vel = landDir.Unit * landSpeed
             vel = sanitizeVelocity(hrp.Position, vel, ignoreList)
+            -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+            vel = clampSafeAltitude(hrp, vel)
             if FlyPathfinder.currentBV then
                 FlyPathfinder.currentBV.Velocity = vel
             end
@@ -6376,11 +6620,11 @@ killMonster = function(npcData, speed, opts)
             local combatDist, visualDist, serverDist = getCombatDistanceTo(targetHRP.Position)
 
             local needClose = (serverDist > ATTACK_RANGE_SOFT) or (visualDist > ATTACK_RANGE_SOFT) or (distHRP > 2.0)
-            -- Tư thế: ĐÁNH (trong tầm) = nằm ngang; BAY (né/kéo tới, ngoài tầm) = đứng
+            -- Tư thế: đánh trong tầm vẫn ĐỨNG THẲNG (dive đã xóa — không lật nằm ngang)
             canSwing = serverDist <= ATTACK_RANGE_SOFT and visualDist <= ATTACK_RANGE_SOFT
-            AAB_hoverDive = canSwing and "dive" or nil
-            -- POSE PIN: cập nhật tư thế cho heartbeat ghim (dive = nằm ngang)
-            PosePin.dive = canSwing
+            AAB_hoverDive = nil
+            -- POSE PIN: giữ tư thế đứng (không ghim nằm ngang)
+            PosePin.dive = false
             PosePin.lastUpdate = os.clock()
             if needClose then
                 local moveDir = diff.Magnitude > 0.1 and diff.Unit or Vector3.new(0, 0, -1)
