@@ -61,7 +61,6 @@ local Window = Fluent:CreateWindow({
  SubTitle = "by Thuc",
  TabWidth = 160,
  Size = UDim2.fromOffset(580, 460),
- Acrylic = true,
  Theme = "Dark",
  -- Mobile: không dùng phím (không có bàn phím) — chỉ bật/tắt bằng nút/thanh trên màn hình
  MinimizeKey = (game:GetService("UserInputService").TouchEnabled == true) and nil or Enum.KeyCode.LeftControl
