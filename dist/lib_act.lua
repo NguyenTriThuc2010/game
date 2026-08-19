@@ -367,7 +367,8 @@ end
   local vertVelocity, isMovingVertically = calculateVerticalVelocity(hrp.Position.Y, desiredY)
 
   -- Ap dung velocity tong hop
-  bv.Velocity = horizVelocity + Vector3.new(0, vertVelocity, 0)
+  -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+  bv.Velocity = (_G.clampSafeAltitude or clampSafeAltitude)(hrp, horizVelocity + Vector3.new(0, vertVelocity, 0))
 
   -- Drain stamina: ngang + doc rieng biet
   -- BIỂN + không drain được stamina (không BlackLeg) → bỏ drain (bay thấp sát nước là hợp lệ)
