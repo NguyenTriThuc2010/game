@@ -213,7 +213,7 @@ RunService.Heartbeat:Connect(function(dt)
  end
  if not Fly.flyGyro or not Fly.flyGyro.Parent then
   local gyro = Instance.new("BodyGyro")
-  gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
+  gyro.MaxTorque = Vector3.new(0,1,1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
   gyro.P         = 3000
   gyro.D         = 100
   gyro.CFrame    = hrp.CFrame
@@ -637,10 +637,11 @@ local function hasBlackLeg()
  return false
 end
 
---- Tru stamina bằng Sky Walk — CHỈ khi có BlackLeg trong túi đồ (bỏ Dash/takestam)
---- Tra ve false neu khong the tru (khong co BlackLeg → nên dừng bay)
+--- Tru stamina bằng Sky Walk — CHỈ khi có cách tiêu hao stamina hợp pháp
+--- (BlackLeg trong túi đồ, hoặc FightingStyle Rokushiki/Geppo).
+--- Tra ve false neu khong the tru (→ nên dừng bay cao)
 local function drainStamina()
- if not hasBlackLeg() then return false end
+ if not (_G.hasStaminaDrainAbility and _G.hasStaminaDrainAbility()) then return false end
  pcall(callSkyWalk)
  return true
 end
