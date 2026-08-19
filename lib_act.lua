@@ -721,7 +721,7 @@ QuestAPI.goTake = function(npcName, db, speed)
   local myHrp = getHumanoidRootPart()
   if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
    local d = (npcPos - myHrp.Position).Magnitude
-   fp.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, speed or 75)
+   fp.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, math.min(speed or 75, (_G.maxFlightSpeed or function() return 70 end)()))
   end
   task.wait(0.15)
  end
@@ -740,7 +740,7 @@ QuestAPI.goTake = function(npcName, db, speed)
      local myHrp = getHumanoidRootPart()
      if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
       local d = (npcPos - myHrp.Position).Magnitude
-      fp.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, speed or 75)
+      fp.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, math.min(speed or 75, (_G.maxFlightSpeed or function() return 70 end)()))
      end
      task.wait(0.15)
     else break end

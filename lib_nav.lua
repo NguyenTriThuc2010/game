@@ -3061,7 +3061,7 @@ local function flyCloseForInteract(targetPos, prompt, speed)
     end
 
     -- Dùng mode DirectLow của FlyPathfinder (bay thấp, không teleport)
-    local flySpeed = math.min(tonumber(speed) or 75, 70)
+    local flySpeed = math.min(tonumber(speed) or 75, maxFlightSpeed())
     local arrived = FlyPathfinder.FlyTo(hoverPos, flySpeed, "DirectLow", "hover")
 
     hrp = getHumanoidRootPart()
@@ -3395,7 +3395,7 @@ killMonster = function(npcData, speed, opts)
                 local moveDir = diff.Magnitude > 0.1 and diff.Unit or Vector3.new(0, 0, -1)
                 -- Visual sát nhưng server còn xa: kéo mạnh hơn bằng BV (không CFrame)
                 local pullMul = (visualDist <= ATTACK_RANGE_SOFT and serverDist > ATTACK_RANGE_SOFT) and 7 or 5
-                local safeDir = pullTowardSafe(hrp, targetHover, math.clamp(math.max(distHRP, serverDist) * pullMul, 14, speed))
+                local safeDir = pullTowardSafe(hrp, targetHover, math.clamp(math.max(distHRP, serverDist) * pullMul, 14, math.min(speed, maxFlightSpeed())))
                 -- Luôn xoay mặt về target (dù đang kéo ngang/kéo xuống hay lên đầu)
                 -- Dive ổn định: còn gần điểm hover (<=4.5) thì giữ tư thế nằm ngang
                 -- (ngưỡng distHRP>2.0 cũ làm tư thế lật qua lại mỗi frame khi quái cử động nhẹ)
@@ -3419,7 +3419,7 @@ killMonster = function(npcData, speed, opts)
                 local stillAlive, _, tHRP = isCombatTargetAlive(npcData)
                 if stillAlive and hrp2 and tHRP then
                     local pull = (getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0))) - hrp2.Position
-                    pullTowardSafe(hrp2, getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0)), math.min(speed, 70))
+                    pullTowardSafe(hrp2, getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0)), math.min(speed, maxFlightSpeed()))
                     faceTowardPosition(hrp2, tHRP.Position, FlyPathfinder.currentGyro)
                 elseif not stillAlive then
                     break
@@ -3445,7 +3445,7 @@ killMonster = function(npcData, speed, opts)
                                 local h = getHumanoidRootPart()
                                 if not h then break end
                                 if (retreatPos - h.Position).Magnitude <= 1.5 then break end
-                                pullTowardSafe(h, retreatPos, math.max(speed, 70))
+                                pullTowardSafe(h, retreatPos, math.min(math.max(speed, 70), maxFlightSpeed()))
                                 -- Luôn hướng mặt về target khi né
                                 if retreatTarget and retreatTarget.Parent then
                                     faceTowardPosition(h, retreatTarget.Position, FlyPathfinder.currentGyro)
@@ -3463,7 +3463,7 @@ killMonster = function(npcData, speed, opts)
                     local hrp2 = getHumanoidRootPart()
                     local stillAlive, _, tHRP = isCombatTargetAlive(npcData)
                     if stillAlive and hrp2 and tHRP then
-                        pullTowardSafe(hrp2, getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0)), math.min(speed, 70))
+pullTowardSafe(hrp2, getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0)), math.min(speed, maxFlightSpeed()))
                         faceTowardPosition(hrp2, tHRP.Position, FlyPathfinder.currentGyro)
                     elseif not stillAlive then
                         break

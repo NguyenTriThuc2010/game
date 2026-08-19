@@ -1,4 +1,3 @@
--- đặt tên là kinh tế để đánh lừa tìm kiếm
 local Players = game:GetService("Players")
 local Player = Players.LocalPlayer
 local LocalPlayer = Player
@@ -103,7 +102,7 @@ local HEIGHT_LIMIT            = 7       -- neu cao hon muc nay la dang bay
 local ATTACK_RANGE            = 10      -- server nhận damage trong ~10 studs (hover trên đầu target cao ~8-9)
 local ATTACK_RANGE_SOFT       = 9.5     -- ngưỡng an toàn khi gửi damage (tránh mép bị từ chối)
 
-local BOOST_HEIGHT            = 500     -- do cao muc tieu khi ne vat can (studs)
+local BOOST_HEIGHT            = 20      -- do cao muc tieu khi vuot vat can nhe (studs)     -- do cao muc tieu khi ne vat can (studs)
 local BOOST_TOLERANCE         = 1       -- sai so cho phep khi dat do cao (studs)
 local VERTICAL_BOOST_SPEED    = 60      -- toc do len/xuong khi chuyen trang thai (studs/s)
 
@@ -207,7 +206,7 @@ RunService.Heartbeat:Connect(function(dt)
  end
  if not Fly.flyGyro or not Fly.flyGyro.Parent then
   local gyro = Instance.new("BodyGyro")
-  gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
+  gyro.MaxTorque = Vector3.new(0,1,1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
   gyro.P         = 3000
   gyro.D         = 100
   gyro.CFrame    = hrp.CFrame
@@ -631,10 +630,11 @@ local function hasBlackLeg()
  return false
 end
 
---- Tru stamina bằng Sky Walk — CHỈ khi có BlackLeg trong túi đồ (bỏ Dash/takestam)
---- Tra ve false neu khong the tru (khong co BlackLeg → nên dừng bay)
+--- Tru stamina bằng Sky Walk — CHỈ khi có cách tiêu hao stamina hợp pháp
+--- (BlackLeg trong túi đồ, hoặc FightingStyle Rokushiki/Geppo).
+--- Tra ve false neu khong the tru (→ nên dừng bay cao)
 local function drainStamina()
- if not hasBlackLeg() then return false end
+ if not (_G.hasStaminaDrainAbility and _G.hasStaminaDrainAbility()) then return false end
  pcall(callSkyWalk)
  return true
 end
@@ -1542,20 +1542,16 @@ local function setFaceMode(active, targetGetter)
 end
 
 -- Xoay nhân vật nhìn về target qua BodyGyro only (không ghi hrp.CFrame — anti-cheat)
--- tiltMode = "dive": body nằm ngang úp mặt xuống target — CHỈ đổi gyro,
--- lookCF trả về vẫn là bản thẳng (giữ damageArgs[6] như cũ cho server)
+-- tiltMode đã bỏ ("dive" = lật người nằm ngang bị XÓA theo yêu cầu) — luôn giữ người đứng
 local function faceTowardPosition(hrp, targetPos, gyro, tiltMode)
     if not (hrp and targetPos) then return hrp and hrp.CFrame or CFrame.new() end
-
-    -- +90° quanh trục phải: đầu (local +Y) xoay về hướng nhìn (+Z) → nằm ngang úp mặt
-    local diveTilt = (tiltMode == "dive") and CFrame.Angles(math.pi / 2, 0, 0) or nil
 
     -- FaceLook override: hướng mặt thẳng vào target (nghiêng lên/xuống theo 3D)
     if FaceLook.active and FaceLook.targetGetter then
         local t = FaceLook.targetGetter()
         if t then
             local lookCF = CFrame.lookAt(hrp.Position, t)
-            local setCF = diveTilt and (lookCF * diveTilt) or lookCF
+            local setCF = lookCF
             if gyro and gyro.Parent then
                 gyro.CFrame = setCF
             elseif FlyPathfinder and FlyPathfinder.currentGyro and FlyPathfinder.currentGyro.Parent then
@@ -1570,7 +1566,7 @@ local function faceTowardPosition(hrp, targetPos, gyro, tiltMode)
     local flat = Vector3.new(targetPos.X, hrp.Position.Y, targetPos.Z)
     local lookAt = ((flat - hrp.Position).Magnitude > 0.15) and flat or targetPos
     local lookCF = CFrame.lookAt(hrp.Position, lookAt)
-    local setCF = diveTilt and (lookCF * diveTilt) or lookCF
+    local setCF = lookCF
     if gyro and gyro.Parent then
         gyro.CFrame = setCF
     elseif FlyPathfinder and FlyPathfinder.currentGyro and FlyPathfinder.currentGyro.Parent then
@@ -2400,15 +2396,86 @@ local SEA_LOW_FLY_MARGIN = 2   -- bay sát mặt nước: dưới ngưỡng watc
 local drainOkCache = { value = nil, at = 0 }
 local DRAIN_CACHE_SECONDS = 2
 
---- Có cách tiêu hao stamina không (BlackLeg → Sky Walk)? Cache 2s — hasBlackLeg() đọc inventory JSON đắt
+--- Có cách tiêu hao stamina khi bay cao không (BlackLeg → Sky Walk / Rokushiki → Geppo)?
+--- Cache 2s — hasBlackLeg() đọc inventory JSON đắt
+local hasStaminaDrainAbility = function()
+ if hasBlackLeg() then return true end
+ local ok, style = pcall(function() return getFightingStyle() end)
+ if ok and type(style) == "string" then
+  local s = string.lower(style)
+  return s:find("rokushiki", 1, true) ~= nil or s:find("geppo", 1, true) ~= nil
+ end
+ return false
+end
+
 local canDrainStamina = function()
  local nowT = os.clock()
  if drainOkCache.value == nil or nowT - drainOkCache.at > DRAIN_CACHE_SECONDS then
-  drainOkCache.value = hasBlackLeg()
+  drainOkCache.value = hasStaminaDrainAbility()
   drainOkCache.at = nowT
  end
  return drainOkCache.value == true
 end
+
+-- ================== FLIGHT MODE: SAFE / RISK ==================
+-- SAFE : không Geppo + không BlackLeg → KHÔNG tiêu hao được stamina → luật game
+--        chỉ cho bay cao ≤ 15 studs. Bám địa hình, vượt vật cản xong phải HẠ NGAY
+--        về độ cao an toàn (không lơ lửng trên cao — tốn thời gian + dễ bị watchdog).
+-- RISK : có Geppo / BlackLeg → drain được stamina → được bay cao (SkyCruise 60+,
+--        A* 3D tầng 8/20/45, vượt tường bằng cầu trời) nhưng phải tick drain đều.
+local FlyMode = { state = "SAFE", changedAt = 0 }
+_G.FlyMode = FlyMode
+local function evaluateFlyMode()
+ return canDrainStamina() and "RISK" or "SAFE"
+end
+local function refreshFlyMode()
+ local newMode = evaluateFlyMode()
+ if newMode ~= FlyMode.state then
+  local old = FlyMode.state
+  FlyMode.state = newMode
+  FlyMode.changedAt = os.clock()
+  print(string.format("[FlyMode] %s → %s (%s)", old, newMode,
+   newMode == "RISK" and "có Geppo/BlackLeg → bay cao" or "không drain → bám thấp"))
+ end
+ return FlyMode.state
+end
+
+--- Giới hạn tốc độ hệ thống theo FlyMode:
+--- SAFE (không Geppo/BlackLeg) → tối đa 70 studs/s (KHÔNG vượt — watchdog chụp tốc độ cao)
+--- RISK (có Geppo/BlackLeg)     → tối đa 300 studs/s
+local function maxFlightSpeed()
+ return FlyMode.state == "SAFE" and 70 or 300
+end
+_G.maxFlightSpeed = maxFlightSpeed
+
+--- [FlyMode] Giới hạn độ cao SAFE: tối đa 15 studs trên mặt đất/nước (càng thấp càng an toàn),
+--- thấp nhất -1 stud (không cắm đầu xuống đất). RISK: không giới hạn độ cao.
+--- Trả về velocity đã clamp Y theo trần/sàn hợp lệ.
+--- [Lagfix] Cache groundOrSeaBelow theo ô lưới 20 studs (mặt đất ít đổi khi di chuyển)
+--- → không raycast mỗi frame (hàm này gọi mỗi frame trong mọi loop bay).
+local _altCache = { key = nil, gy = nil }
+local function clampSafeAltitude(hrp, vel)
+ if FlyMode.state ~= "SAFE" then return vel end
+ local px, pz = hrp.Position.X, hrp.Position.Z
+ local key = string.format("%.0f|%.0f", math.floor(px / 20), math.floor(pz / 20))
+ local gy = _altCache.gy
+ if _altCache.key ~= key then
+  gy = groundOrSeaBelow(hrp.Position)
+  _altCache.key = key
+  _altCache.gy = gy
+ end
+ if not gy then return vel end
+ local height = hrp.Position.Y - gy
+ if height > 15 then
+  local dy = (gy + 15 - hrp.Position.Y) * 3
+  return Vector3.new(vel.X, math.max(dy, vel.Y), vel.Z)
+ elseif height < -1 then
+  local dy = (gy - 1 - hrp.Position.Y) * 3
+  return Vector3.new(vel.X, math.min(dy, vel.Y), vel.Z)
+ end
+ return vel
+end
+_G.clampSafeAltitude = clampSafeAltitude
 
 --- CHẾ ĐỘ BAY THẤP TRÊN BIỂN: trả về mặt nước Y nếu bên dưới là BIỂN và KHÔNG có cách tiêu hao
 --- stamina (→ phải hạ sát mặt nước). Trả nil → bay bình thường (đất / có BlackLeg).
@@ -2427,7 +2494,7 @@ local function createFlyPhysicsObjects(hrp)
  bv.Parent   = hrp
 
  local gyro = Instance.new("BodyGyro")
- gyro.MaxTorque = Vector3.new(1, 1, 1) * math.huge
+ gyro.MaxTorque = Vector3.new(0, 1, 1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
  gyro.P         = 3000
  gyro.D         = 100
  gyro.CFrame    = hrp.CFrame
@@ -2475,12 +2542,14 @@ end
 local function shouldFlyAtBoostHeight(hrp, horizontalDir, remainingDistance)
  if not hrp then return false end
 
+ -- Chi boost khi co vat can dung thang CHAN PHIA TRUOC o tam nguc/dau (khong boost vi cam dau vao dat)
  local hit = castRayForward(hrp, horizontalDir, OBSTACLE_CHECK_DISTANCE)
- if hit then
+ if hit and hit.Instance and hit.Instance.CanCollide then
+  -- Neu chi la dat duoi chan (Normal huong len) thi khong boost vo ly
+  if hit.Normal and hit.Normal.Y > 0.7 then
+   return false
+  end
   return true, "Obstacle"
- end
- if remainingDistance and remainingDistance > FAR_DISTANCE_THRESHOLD then
-  return true, "FarDistance"
  end
  return false
 end
@@ -2586,6 +2655,7 @@ end
 
 startManualFly = function()
  if Status.Fly then stopFly() end
+ refreshFlyMode()
  local ok, hrp, humanoid = validateAndPrepareFly()
  if not ok then return end
 
@@ -2627,18 +2697,20 @@ startManualFly = function()
    bv.Parent   = hrp
    Fly.flyBV   = bv
   end
-  if not gyro or not gyro.Parent then
-   gyro = Instance.new("BodyGyro")
-gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
-   gyro.P         = 3000
-   gyro.D         = 100
-   gyro.CFrame    = hrp.CFrame
-   gyro.Parent    = hrp
-   Fly.flyGyro    = gyro
-  end
+   if not gyro or not gyro.Parent then
+    gyro = Instance.new("BodyGyro")
+gyro.MaxTorque = Vector3.new(0,1,1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
+    gyro.P         = 3000
+    gyro.D         = 100
+    gyro.CFrame    = hrp.CFrame
+    gyro.Parent    = hrp
+    Fly.flyGyro    = gyro
+   end
 
-  local camCFrame = workspace.CurrentCamera.CFrame
-  local velocity, moveDir = calculateManualHorizontalVelocity(camCFrame, Fly.flySpeed)
+   local camCFrame = workspace.CurrentCamera.CFrame
+  -- [FlyMode] Giới hạn tốc độ hệ thống: SAFE ≤ 70, RISK ≤ 300
+  local effFlySpeed = math.min(Fly.flySpeed, maxFlightSpeed())
+  local velocity, moveDir = calculateManualHorizontalVelocity(camCFrame, effFlySpeed)
 
   -- [MIN HEIGHT] San dong MỖI FRAME: mat dat/nuoc that duoi chan + 2 studs
   -- (IgnoreWater=false de bat ca mat nuoc); san TUYET DOI = BASE_Y (-2.7) —
@@ -2688,14 +2760,15 @@ gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
   Fly.desiredY = minY
 
   if velocity.Magnitude > 0 then
-   bv.Velocity = velocity + Vector3.new(0, yVelocity, 0)
+   -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+   bv.Velocity = clampSafeAltitude(hrp, velocity + Vector3.new(0, yVelocity, 0))
    -- Xoay nhan vat theo huong di chuyen ngang (bo qua Y de khong nghieng)
    local flatDir = Vector3.new(moveDir.X, 0, moveDir.Z)
    if flatDir.Magnitude > 0.01 then
     gyro.CFrame = CFrame.new(hrp.Position, hrp.Position + flatDir)
    end
   else
-   bv.Velocity = Vector3.new(0, yVelocity, 0)
+   bv.Velocity = clampSafeAltitude(hrp, Vector3.new(0, yVelocity, 0))
   end
 
   -- Drain stamina: ngang (lien tuc) + doc (them khi leo/ha)
@@ -2720,6 +2793,7 @@ end
 
 startAutoFly = function(targetGetter, onArrive, arriveDistance)
  if Status.Fly then stopFly() end
+ refreshFlyMode()
  arriveDistance = arriveDistance or 4
 
  local ok, hrp, humanoid = validateAndPrepareFly()
@@ -2761,15 +2835,15 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
    bv.Parent   = hrp
    Fly.flyBV   = bv
   end
-  if not gyro or not gyro.Parent then
-   gyro = Instance.new("BodyGyro")
-   gyro.MaxTorque = Vector3.new(1,1,1) * math.huge
-   gyro.P         = 3000
-   gyro.D         = 100
-   gyro.CFrame    = hrp.CFrame
-   gyro.Parent    = hrp
-   Fly.flyGyro    = gyro
-  end
+if not gyro or not gyro.Parent then
+    gyro = Instance.new("BodyGyro")
+    gyro.MaxTorque = Vector3.new(0,1,1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
+    gyro.P         = 3000
+    gyro.D         = 100
+    gyro.CFrame    = hrp.CFrame
+    gyro.Parent    = hrp
+    Fly.flyGyro    = gyro
+   end
 
   local targetPos = targetGetter()
   if not targetPos then
@@ -2778,8 +2852,9 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
   end
 
   -- Tinh velocity ngang
+  local effFlySpeed = math.min(Fly.flySpeed, maxFlightSpeed())
   local horizVelocity, horizontalDir, flatDistance =
-   calculateAutoHorizontalVelocity(hrp.Position, targetPos, arriveDistance, Fly.flySpeed)
+   calculateAutoHorizontalVelocity(hrp.Position, targetPos, arriveDistance, effFlySpeed)
 
   if horizontalDir then
    -- Dang bay ve phia muc tieu -> xoay nhan vat theo huong ngang
@@ -2831,12 +2906,23 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
       desiredY = bridgeY
       Fly.bridgeActive = true
      else
-      desiredY = BASE_Y + BOOST_HEIGHT
+      -- [FlyMode] SAFE (không Geppo/BlackLeg): cấm vọt cao bất hợp pháp →
+      -- giữ sát mặt đất (≤ ngưỡng watchdog 15)
+      if FlyMode.state == "SAFE" then
+       desiredY = terrainFloor
+      else
+       desiredY = terrainFloor + 12
+      end
       Fly.bridgeActive = false
      end
     end
    else
-    desiredY = BASE_Y + BOOST_HEIGHT
+    -- [FlyMode] SAFE: không vọt cao bất hợp pháp → giữ sát mặt đất
+    if FlyMode.state == "SAFE" then
+     desiredY = terrainFloor
+    else
+     desiredY = terrainFloor + 12
+    end
     Fly.bridgeActive = false
    end
   else
@@ -2862,202 +2948,8 @@ startAutoFly = function(targetGetter, onArrive, arriveDistance)
   local vertVelocity, isMovingVertically = calculateVerticalVelocity(hrp.Position.Y, desiredY)
 
   -- Ap dung velocity tong hop
-  bv.Velocity = horizVelocity + Vector3.new(0, vertVelocity, 0)
-
-  -- Drain stamina: ngang + doc rieng biet
-  -- BIỂN + không drain được stamina (không BlackLeg) → bỏ drain (bay thấp sát nước là hợp lệ)
-  local horizOk, vertOk = true, true
-  if not seaLowY then
-   horizOk = tickHorizontalStaminaDrain(stamAccum, dt)
-   vertOk  = tickVerticalStaminaDrain(vertStamAccum, dt, isMovingVertically)
-  end
-  if not horizOk or not vertOk then
-   stopFly()
-  end
- end)
-end
-
--- ================== INIT ==================
-if isPlayerAboveGroundLevel() then
- Fly.flyMode = "Height"
-else
- Fly.flyMode = "Low"
-end
-
--- Dat SetValue sau khi tat ca ham (startManualFly, stopFly) da duoc dinh nghia
--- Tranh loi "attempt to call a nil value" khi OnChanged duoc trigger ngay lap tuc
-Options.Fly:SetValue(false)
-
--- ================== UI: ISLAND FLY ==================
--- Phan UI nay dat cuoi file vi can cac ham Island Navigation da san sang
-
-do
- local islandNames = getIslandNamesSorted()
-
- if #islandNames == 0 then
-  -- Khong tim thay dao nao trong workspace.Islands
-  Tabs.Main:AddParagraph({
-   Title   = "Island Fly",
-   Content = "Khong tim thay dao nao trong workspace.Islands"
-  })
- else
-  -- Dropdown chon dao
-  local IslandDropdown = Tabs.Main:AddDropdown("IslandSelect", {
-   Title       = "Choose Island",
-   Description = "Choose Island to fly " .. "(" .. #islandNames .. " dao)",
-   Values      = islandNames,
-   Default     = islandNames[1],
-   Multi       = false,
-   Callback    = function(value)
-    IslandFly.selectedIsland = value
-    notify("Choose Island: " .. tostring(value), 2)
-   end
-  })
-  -- Set mac dinh dao dau tien
-  IslandFly.selectedIsland = islandNames[1]
-
-  -- Toggle bat/tat bay toi dao
-  local IslandFlyToggle = Tabs.Main:AddToggle("IslandFly", {
-   Title   = "Fly To Island",
-   Default = false
-  })
-  IslandFlyToggle:OnChanged(function()
-   local active = Options.IslandFly.Value
-   IslandFly.active = active
-   if active then
-    notify("Flying in: " .. tostring(IslandFly.selectedIsland), 3)
-    setSharedStatus("IslandFly", "Bay", "Bay toi dao: " .. tostring(IslandFly.selectedIsland))
-    flyToSelectedIsland()
-   else
-    notify("Flying in Island", 2)
-    setSharedStatus("IslandFly", "Idle", "Bay dao da tat")
-    stopIslandFly()
-   end
-  end)
-  Options.IslandFly:SetValue(false)
- end
-end
-
--- ================== UI: AUTO FARM (QUEST) ==================
--- Farm theo Quest hien tai: Target + maxCount lay tu getQuestInfo()
-
-local AutoFarm = {
- active            = false,
- speed             = 75,
- statusLabel       = nil,
- lastUpgradeCheck  = 0, -- lan cuoi kiem tra quest DB khi len cap (giay)
-  hadQuest          = false, -- đang có quest farm được (dùng phát hiện hủy quest THỦ CÔNG)
-}
--- ================== AUTO QUEST ==================
--- Dinh nghia TRUOC autoFarmLoop (khong phu thuoc initImpelDownModule) - fix loi "index nil findAvailable"
-local QuestAPI = {}
-_G.QuestAPI = QuestAPI
-print("[AutoQuest] QuestAPI ready (dinh nghia truoc autoFarmLoop)")
-
--- Cấp người chơi: Stats<Player>.Stats.Level (IntValue)
-QuestAPI.getPlayerLevel = function()
- local rs = game:GetService("ReplicatedStorage")
- local pStats = rs:FindFirstChild("Stats" .. Player.Name) or (rs:FindFirstChild("Stats") and rs.Stats:FindFirstChild(Player.Name))
- local s = pStats and pStats:FindFirstChild("Stats")
- local lv = s and s:FindFirstChild("Level")
- return (lv and tonumber(lv.Value)) or 0
-end
-
--- ================== QUEST REMOTE AN TOÀN ==================
--- Server chỉ nhận quest trong ~5 studs. MỌI invoke quest remote đều qua:
---   1. questInvokeAllowed() — rate-limit chung tối đa 1 lần / 5s (chống spam → anti-cheat)
---   2. Cổng khoảng cách 5 studs theo serverPos (vị trí server thấy) — gọi từ xa = nghi exploit = BAN
---   3. NPC model phải hiện diện trong workspace gần vị trí — remote chỉ chạy khi có chứng cứ thực tế
-
-QuestAPI.lastQuestInvoke = 0
-local function questInvokeAllowed()
- local nowT = os.clock()
- if nowT - QuestAPI.lastQuestInvoke < 5 then return false end
- QuestAPI.lastQuestInvoke = nowT
- return true
-end
-
--- Khoảng cách tối đa để gọi takequest — server chỉ nhận quest trong ~5 studs
-local QUEST_TAKE_RANGE = 5
--- Bán kính tìm model NPC phải hiện diện quanh tọa độ QuestDB (cứng: không có model = không gọi remote)
-local QUEST_NPC_MODEL_RANGE = 50
--- NPC xa hơn mức này mà model chưa load (streaming) → vẫn bay thẳng tới tọa độ QuestDB
-local QUEST_FAR_DISTANCE = 1000
-
--- Nhận quest: Events.Quest:InvokeServer({ "takequest", questName })
-QuestAPI.takeQuest = function(questName)
- if not questName then return false end
- if not questInvokeAllowed() then return false end
- local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
- local remote = events and events:FindFirstChild("Quest")
- if not remote then return false end
- local ok = pcall(function() remote:InvokeServer({ "takequest", questName }) end)
- return ok
-end
-
--- Hủy quest hiện tại: Events.Quest:InvokeServer({ "quit" }) — dùng chung rate-limit 5s
-QuestAPI.cancelQuest = function()
- if not questInvokeAllowed() then return false end
- local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
- local remote = events and events:FindFirstChild("Quest")
- if not remote then return false end
- local ok = pcall(function() remote:InvokeServer({ "quit" }) end)
- return ok
-end
-
--- Kiểm tra NPC quest có thực sự tồn tại trong workspace quanh tọa độ (an toàn tuyệt đối)
-QuestAPI.npcPresent = function(npcName, position)
- if not (npcName and position) then return false end
- return QuestAPI.getNPCModel(npcName, position) ~= nil
-end
-
--- Tìm model NPC thật quanh tọa độ — ưu tiên model khớp tên (chính xác -> chứa tên -> bất kỳ)
-QuestAPI.getNPCModel = function(npcName, position)
- if not position then return nil end
- local best, bestScore = nil, 0
- for _, model in ipairs(workspace:GetDescendants()) do
-  if model:IsA("Model") then
-   local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-   if root and (root.Position - position).Magnitude <= QUEST_NPC_MODEL_RANGE then
-    local score = (model.Name == npcName) and 3 or (model.Name:find(npcName, 1, true) and 2) or 1
-    if score > bestScore then best, bestScore = model, score end
-   end
-  end
- end
- return best
-end
-      desiredY = BASE_Y + BOOST_HEIGHT
-      Fly.bridgeActive = false
-     end
-    end
-   else
-    desiredY = BASE_Y + BOOST_HEIGHT
-    Fly.bridgeActive = false
-   end
-  else
-   -- Da QUA tuong (het vat can): ha xuong bay binh thuong, tiep tuc muc dich
-   if Fly.bridgeActive and not isSeparatedByThickWall(hrp.Position, targetPos, nil, true) then
-    desiredY = terrainFloor
-    Fly.bridgeActive = false
-   else
-    -- CHE DO BAY CRUISING: giu do cao hien tai, khong tu ha xuong
-    -- Logic:
-    --   1. Raycast xuong de tim mat dat/bien thuc (san toi thieu)
-    --   2. desiredY = max(do_cao_hien_tai, san_toi_thieu)
-    --      -> Neu dang bay cao: giu nguyen (khong ha xuong)
-    --      -> Neu bi day xuong thap hon san: tu dong len de tranh lun vao dat/bien
-    desiredY = math.max(hrp.Position.Y, terrainFloor)
-   end
-  end
-
-  -- Cap nhat desiredY cho Watchdog theo doi
-  Fly.desiredY = desiredY
-
-  -- Tinh velocity doc
-  local vertVelocity, isMovingVertically = calculateVerticalVelocity(hrp.Position.Y, desiredY)
-
-  -- Ap dung velocity tong hop
-  bv.Velocity = horizVelocity + Vector3.new(0, vertVelocity, 0)
+  -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+  bv.Velocity = clampSafeAltitude(hrp, horizVelocity + Vector3.new(0, vertVelocity, 0))
 
   -- Drain stamina: ngang + doc rieng biet
   -- BIỂN + không drain được stamina (không BlackLeg) → bỏ drain (bay thấp sát nước là hợp lệ)
@@ -3295,153 +3187,198 @@ QuestAPI.canDrainStamina  = canDrainStamina
 QuestAPI.seaFlyLowActive  = seaFlyLowActive
 QuestAPI.waterBelow15     = waterBelow15
 
--- NPC quest khả dụng: có position + minLevel <= cấp + có targets (bỏ Zen/Noah/Zhen chưa có thông tin)
--- CHỌN QUEST PHÙ HỢP CẤP: ưu tiên minLevel CAO NHẤT <= cấp hiện tại (quest đúng tầm, rewards tốt);
--- cùng minLevel thì chọn cái GẦN NHẤT. Bỏ qua NPC trong cooldown + pauseUntil.
+-- NPC quest khả dụng: BẮT BUỘC chỉ chọn quest có minLevel CAO NHẤT phù hợp cấp người chơi.
+-- TUYỆT ĐỐI KHÔNG bay tới hay nhận bất kỳ quest nào thấp hơn cấp hiện tại!
 QuestAPI.skipUntil = {}
 QuestAPI.pauseUntil = 0
+
+-- Lấy minLevel cao nhất khả dụng cho người chơi hiện tại (tuyệt đối không bao giờ hạ cấp)
+QuestAPI.getMaxMinLevel = function()
+ local lvl = QuestAPI.getPlayerLevel()
+ local completed = getCompletedQuests()
+ local maxMin = -1
+ for npcName, db in pairs(QuestDB) do
+  local questKey = db.quest or ("Help " .. npcName)
+  local alreadyDone = completed[questKey] or completed[npcName]
+  if db.minLevel and db.minLevel <= lvl and not alreadyDone then
+   if db.minLevel > maxMin then
+    maxMin = db.minLevel
+   end
+  end
+ end
+ return maxMin
+end
+
+-- Tìm quest phù hợp nhất: CHỈ CHỌN quest có minLevel == maxMinLevel (cấp cao nhất).
 QuestAPI.findAvailable = function()
  if os.clock() < QuestAPI.pauseUntil then return nil end
- local lvl = QuestAPI.getPlayerLevel()
+ local maxMin = QuestAPI.getMaxMinLevel()
+ if maxMin < 0 then return nil end
+ 
  local myPos = getPlayerPosition()
- local nowT = os.clock()
- -- Lay danh sach quest da hoan thanh de loc bo (dung QuestName hoac db.quest lam key)
- local completed = getCompletedQuests()
- local bestName, bestDb, bestMin, bestDist = nil, nil, -1, math.huge
- for npcName, db in pairs(QuestDB) do
-  -- Kiem tra quest nay da hoan thanh chua (khop voi db.quest hoac npcName)
-  local questKey = db.quest or ("Help " .. npcName)
-  local alreadyDone = completed[questKey] or completed[npcName]
-  if db.position and db.minLevel and db.targets and db.minLevel <= lvl
-   and not alreadyDone
-   and not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
-   local d = myPos and (db.position - myPos).Magnitude or 0
-   if db.minLevel > bestMin or (db.minLevel == bestMin and d < bestDist) then
-    bestName, bestDb, bestMin, bestDist = npcName, db, db.minLevel, d
-   end
-  end
- end
- return bestName, bestDb
-end
-
--- Bán kính "đứng gần NPC quest" để kích hoạt quest đó (đứng cạnh + bật farm → nhận ngay, không bay xa)
-local QUEST_NEAR_RADIUS = 3
-
---- NPC quest GẦN NHẤT (minLevel <= cấp): dùng khi ĐỨNG GẦN NPC muốn farm (anyDistance=false → trong
---- bán kính QUEST_NEAR_RADIUS) hoặc FALLBACK khi không thể bay tới quest hợp lý (anyDistance=true).
---- excludeName: loại NPC vừa thất bại. Trả (name, db) hoặc (nil, nil)
-QuestAPI.findNearest = function(excludeName, anyDistance)
- if os.clock() < QuestAPI.pauseUntil then return nil end
- local lvl = QuestAPI.getPlayerLevel()
- local myPos = getPlayerPosition()
- local nowT = os.clock()
- -- Lay danh sach quest da hoan thanh de loc bo
  local completed = getCompletedQuests()
  local bestName, bestDb, bestDist = nil, nil, math.huge
+ 
  for npcName, db in pairs(QuestDB) do
   local questKey = db.quest or ("Help " .. npcName)
   local alreadyDone = completed[questKey] or completed[npcName]
-  if npcName ~= excludeName and db.position and db.minLevel and db.targets and db.minLevel <= lvl
-   and not alreadyDone
-   and not (QuestAPI.skipUntil[npcName] and QuestAPI.skipUntil[npcName] > nowT) then
-   local d = myPos and (db.position - myPos).Magnitude or 0
-   if d <= QUEST_NEAR_RADIUS or anyDistance then
-    if d < bestDist then bestName, bestDb, bestDist = npcName, db, d end
+  -- BẮT BUỘC: minLevel PHẢI ĐÚNG BẬC CAO NHẤT (== maxMin). Tuyệt đối không chọn quest thấp hơn!
+  if db.minLevel and db.minLevel == maxMin and not alreadyDone then
+   local pos = db.position or getNPCPosition(npcName)
+   if pos then
+    db.position = pos
+    local d = myPos and (pos - myPos).Magnitude or 0
+    if d < bestDist then
+     bestName, bestDb, bestDist = npcName, db, d
+    end
+   elseif not bestName then
+    bestName, bestDb = npcName, db
    end
   end
  end
  return bestName, bestDb
 end
 
--- Bay tới NPC + nhận quest (tối đa 2 lần, MỖI lần đều phải cách NPC <= 5 studs theo serverPos)
+-- Bán kính "đứng gần NPC quest" để kích hoạt quest đó
+local QUEST_NEAR_RADIUS = 3
+
+-- Tìm NPC quest gần nhất nhưng CHỈ trong danh sách quest CÙNG BẬC CẤP CAO NHẤT (minLevel == maxMin).
+QuestAPI.findNearest = function(excludeName, anyDistance)
+ if os.clock() < QuestAPI.pauseUntil then return nil end
+ local maxMin = QuestAPI.getMaxMinLevel()
+ if maxMin < 0 then return nil end
+
+ local myPos = getPlayerPosition()
+ local completed = getCompletedQuests()
+ local bestName, bestDb, bestDist = nil, nil, math.huge
+
+ for npcName, db in pairs(QuestDB) do
+  local questKey = db.quest or ("Help " .. npcName)
+  local alreadyDone = completed[questKey] or completed[npcName]
+  -- BẮT BUỘC: minLevel PHẢI ĐÚNG BẬC CAO NHẤT (== maxMin). Tuyệt đối không chọn quest cấp thấp hơn!
+  if npcName ~= excludeName
+   and db.minLevel and db.minLevel == maxMin
+   and not alreadyDone then
+   local pos = db.position or getNPCPosition(npcName)
+   if pos then
+    db.position = pos
+    local d = myPos and (pos - myPos).Magnitude or 0
+    if d <= QUEST_NEAR_RADIUS or anyDistance then
+     if d < bestDist then
+      bestName, bestDb, bestDist = npcName, db, d
+     end
+    end
+   end
+  end
+ end
+ return bestName, bestDb
+end
+
+-- Bay tới NPC + nhận quest (chỉ nhận quest hợp lệ và đúng cấp cao nhất)
+-- Bay tới NPC + nhận quest: BẮT BUỘC ĐỨNG TRƯỚC MẶT NPC CÁCH 1.5 STUDS (chuẩn khoảng cách tương tác)
 QuestAPI.goTake = function(npcName, db, speed)
  local fp = _G.FlyPathfinder
  if not (npcName and db) then return false end
  local npcPos = db.position or getNPCPosition(npcName)
- if not npcPos then
-  QuestAPI.skipUntil[npcName] = os.clock() + 30
-  return false
- end
+ if not npcPos then return false end
  if not db.position then db.position = npcPos end
 
- -- Cổng CẤP (bước đầu tiên): kiểm tra cấp TRƯỚC khi bay/nhận
+ -- CỔNG KIỂM TRA CẤP BẮT BUỘC:
  local lvlGate = QuestAPI.getPlayerLevel()
- if db.minLevel and lvlGate and lvlGate < db.minLevel then
-  QuestAPI.skipUntil[npcName] = os.clock() + 30
-  return false
+ local maxMin = QuestAPI.getMaxMinLevel()
+ if db.minLevel then
+  if lvlGate and lvlGate < db.minLevel then return false end
+  if maxMin and maxMin > 0 and db.minLevel < maxMin then return false end
  end
 
- -- Cổng 1: NPC phải thực sự tồn tại quanh tọa độ
- local npcModel = QuestAPI.npcPresent(npcName, npcPos) and QuestAPI.getNPCModel(npcName, npcPos) or nil
- local modelFar = false
- if not npcModel then
-  local myPos0 = getPlayerPosition()
-  if myPos0 then modelFar = (npcPos - myPos0).Magnitude > QUEST_FAR_DISTANCE end
-  if not modelFar then
-   QuestAPI.skipUntil[npcName] = os.clock() + 30
-   return false
+ -- Kiểm tra quest đã hoàn thành chưa
+ local completed = getCompletedQuests()
+ local questKey = db.quest or ("Help " .. npcName)
+ if completed[questKey] or completed[npcName] then return false end
+
+ local questName = db.quest or ("Help " .. npcName)
+
+ -- TÍNH TOÁN VỊ TRÍ ĐỨNG: 1.5 STUDS TRƯỚC MẶT NPC
+ local function getStandPos()
+  local npcModel = QuestAPI.getNPCModel(npcName, npcPos)
+  if npcModel then
+   local root = npcModel:FindFirstChild("HumanoidRootPart") or npcModel.PrimaryPart
+   if root then
+    local look = root.CFrame.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    if flatLook.Magnitude > 0.1 then
+     -- Đứng ngay trước mặt NPC 2.5 studs
+     return npcPos + flatLook.Unit * 1.5
+    end
+   end
   end
- end
-
- -- BƯỚC BẮT BUỘC: xác minh QUEST CẦN NHẬN
- local questName, questSource = QuestAPI.discoverQuestName(npcName, db, npcModel)
- if not questSource and modelFar then
-  if fp then fp.FlyTo(npcPos, speed or 75, nil, "quest") end
-  npcModel = QuestAPI.getNPCModel(npcName, npcPos)
-  questName, questSource = QuestAPI.discoverQuestName(npcName, db, npcModel)
- end
- if not questSource then
-  QuestAPI.skipUntil[npcName] = os.clock() + 30
-  return false
- end
-
- if fp then fp.FlyTo(npcPos, speed or 75, nil, "quest") end
-
- local function inRange()
   local myPos = getPlayerPosition()
-  return (myPos and (myPos - npcPos).Magnitude <= QUEST_TAKE_RANGE) or false
+  local diff = (myPos and (myPos - npcPos)) or Vector3.new(0, 0, 1.5)
+  local flat = Vector3.new(diff.X, 0, diff.Z)
+  if flat.Magnitude < 0.1 then flat = Vector3.new(0, 0, 1) end
+  return npcPos + flat.Unit * 1.5
  end
 
- -- Ép tới gần NPC trước khi gọi remote
+ local standPos = getStandPos()
+
+ -- Bay tới vị trí đứng 2.5 studs trước mặt NPC
+ if fp then fp.FlyTo(standPos, speed or 75, nil, "quest") end
+
+ local function inStandRange()
+  local myPos = getPlayerPosition()
+  if not myPos then return false end
+  local d = (myPos - npcPos).Magnitude
+  -- Khoảng cách tới NPC nằm trong khoảng 1.6 đến 3.4 studs (chuẩn 2.5 studs, an toàn < 5 studs nhận quest)
+  return d <= 2.4 and d >= 0.7
+ end
+
+ -- Tiếp cận đúng vị trí đứng 2.5 studs
  local t0 = os.clock()
  while os.clock() - t0 < 8 do
   if not AutoFarm.active then return false end
-  if inRange() then break end
+  if inStandRange() then break end
+  standPos = getStandPos()
   local myHrp = getHumanoidRootPart()
   if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
-   local d = (npcPos - myHrp.Position).Magnitude
-   fp.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, speed or 75)
+local d = (standPos - myHrp.Position).Magnitude
+    if d > 0.4 then
+     fp.currentBV.Velocity = (standPos - myHrp.Position).Unit * math.clamp(d * 5, 8, math.min(speed or 75, maxFlightSpeed()))
+    else
+     fp.currentBV.Velocity = Vector3.new(0, 0, 0)
+    end
   end
   task.wait(0.15)
  end
 
- if not inRange() or QuestAPI.waterBelow15(nil) == true then
-  QuestAPI.skipUntil[npcName] = os.clock() + 30
-  return false
+ if QuestAPI.waterBelow15(nil) == true then return false end
+
+ -- Phát hiện tên quest thật từ model nếu có
+ local npcModel = QuestAPI.getNPCModel(npcName, npcPos)
+ if npcModel then
+  local discovered, src = QuestAPI.discoverQuestName(npcName, db, npcModel)
+  if src and discovered then
+   questName = discovered
+  end
  end
 
  for attempt = 1, 2 do
   if not AutoFarm.active then return false end
-  if not inRange() then
-   local tp = os.clock()
-   while os.clock() - tp < 3 do
-    if not inRange() then
-     local myHrp = getHumanoidRootPart()
-     if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
-      local d = (npcPos - myHrp.Position).Magnitude
-      fp.currentBV.Velocity = (npcPos - myHrp.Position).Unit * math.clamp(d * 5, 10, speed or 75)
-     end
-     task.wait(0.15)
-    else break end
-   end
-   if not inRange() then QuestAPI.skipUntil[npcName] = os.clock() + 30; return false end
+  standPos = getStandPos()
+  local myPos = getPlayerPosition()
+  local d = myPos and (myPos - npcPos).Magnitude or 999
+  if d > 2.5 or d < 0.7 then
+local myHrp = getHumanoidRootPart()
+    if fp and myHrp and fp.currentBV and fp.currentBV.Parent then
+     fp.currentBV.Velocity = (standPos - myHrp.Position).Unit * math.clamp((standPos - myHrp.Position).Magnitude * 5, 8, math.min(speed or 75, maxFlightSpeed()))
+    end
+   task.wait(0.2)
   end
 
   QuestAPI.takeQuest(questName)
   task.wait(1.5)
   local q = getQuestInfo()
   if not q then
-   if not getCurrentQuestNPC() then QuestAPI.skipUntil[npcName] = os.clock() + 30; return false end
+   if not getCurrentQuestNPC() then return false end
    return true
   end
   if q.Text and q.Text ~= "" and q.Text ~= questName then
@@ -3454,7 +3391,6 @@ QuestAPI.goTake = function(npcName, db, speed)
    return true
   end
  end
- QuestAPI.skipUntil[npcName] = os.clock() + 30
  return false
 end
 
@@ -3560,29 +3496,18 @@ QuestAPI.cancelQuest()
     continue
 end
     -- [QUEST THẤP HƠN CẤP TỐI ĐA] Nếu quest hiện tại minLevel < max minLevel khả dụng
-    -- → buộc phải đứng GẦN NPC quest đó (≤ QUEST_NEAR_RADIUS = 3 studs) mới được farm tiếp.
-    -- Nếu xa → hủy quest cũ để nhận quest cấp cao hơn.
+    -- → BẮT BUỘC HỦY NGAY LẬP TỨC để nhận quest đúng cấp cao nhất (tuyệt đối không farm tiếp quest thấp hơn cấp!)
     if Options.AutoQuest.Value and db and db.minLevel then
-     local lvl = QuestAPI.getPlayerLevel()
-     local nowT = os.clock()
-     local maxMin = db.minLevel
-     for npcName2, db2 in pairs(QuestDB) do
-      if db2.position and db2.minLevel and db2.targets and db2.minLevel <= lvl
-       and not (QuestAPI.skipUntil[npcName2] and QuestAPI.skipUntil[npcName2] > nowT) then
-       if db2.minLevel > maxMin then maxMin = db2.minLevel end
-      end
-     end
-     if maxMin > db.minLevel then
-      local myPos = getPlayerPosition()
-      if not myPos or (myPos - db.position).Magnitude > QUEST_NEAR_RADIUS then
-       setAutoFarmStatus("WaitingQuest", string.format(
-        "Quest '%s' (minLevel %d) thấp hơn max %d — xa NPC > %d studs → hủy để lấy quest cao hơn",
-        npcName, db.minLevel, maxMin, QUEST_NEAR_RADIUS))
-       QuestAPI.cancelQuest()
-       QuestAPI.pauseUntil = 0 -- nhận quest mới ngay
-       task.wait(0.5)
-       continue
-      end
+     local maxMin = QuestAPI.getMaxMinLevel()
+     if maxMin and maxMin > 0 and db.minLevel < maxMin then
+      setAutoFarmStatus("WaitingQuest", string.format(
+       "Quest '%s' (minLevel %d) thấp hơn cấp tối đa %d → HỦY NGAY để nhận quest đúng cấp",
+       npcName or "?", db.minLevel, maxMin))
+      QuestAPI.cancelQuest()
+      AutoFarm.hadQuest = false
+      QuestAPI.pauseUntil = 0 -- nhận quest mới ngay
+      task.wait(0.5)
+      continue
      end
     end
     -- [LÊN CẤP → QUEST MỚI] Định kỳ 8s: nếu cấp mới mở khóa NPC quest bậc CAO HƠN
@@ -4766,39 +4691,74 @@ FlyPathfinder = {
 }
 
 -- ================== FLIGHT STAMINA WATCHDOG ==================
--- Khi đang bay (FlyPathfinder) cao > 15 studs so với mặt đất mà stamina
--- không đổi trong 0.15s → Sky Walk bị server từ chối (bay bất hợp pháp)
--- → hủy bay ngay + chặn cất cánh lại vài giây.
+-- Khi đang bay cao mà stamina không đổi hoặc hết stamina:
+-- HỦY BAY NGAY → RƠI TỰ DO XUỐNG ĐẤT/BIỂN.
+-- BẮT BUỘC: CHỜ ĐẾN KHI NÀO CHẠM ĐẤT / CHẠM MẶT NƯỚC (hồi stamina) MỚI ĐƯỢC TIẾP TỤC BAY!
 local FLIGHT_HEIGHT_MIN          = 15
 local STAMINA_FREEZE_LIMIT       = 3
-local FLIGHT_BLOCK_AFTER_CANCEL  = 2
-local flightBlockedUntil         = 0
 
--- Lưu tham số FlyTo cuối cùng để auto-resume sau watchdog cancel
+-- Kiểm tra nhân vật đã chạm đất / mặt sàn / mặt biển chưa
+local function isCharacterOnGround()
+    local char = Character or Player.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        local mat = hum.FloorMaterial
+        if mat and mat ~= Enum.Material.Air then
+            return true
+        end
+        local state = hum:GetState()
+        if state == Enum.HumanoidStateType.Landed or state == Enum.HumanoidStateType.Running then
+            return true
+        end
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local gy, isSea = groundOrSeaBelow(hrp.Position)
+        if gy and (hrp.Position.Y - gy) <= 4.0 then
+            return true
+        end
+    end
+    return false
+end
+
+-- Lưu tham số FlyTo cuối cùng để auto-resume sau khi chạm đất
 local lastFlyToParams            = nil
--- Lưu task bị watchdog hủy để auto-resume sau block hết
 local watchdogCancelledTask      = nil
+local waitingForGroundTouch      = false
 
 local function cancelFlightByWatchdog(reason)
-    -- Lưu thông tin chuyến bay bị hủy để auto-resume sau block hết
+    -- Lưu chuyến bay bị hủy, đánh dấu BẮT BUỘC CHỜ CHẠM ĐẤT
     if FlyPathfinder.currentTask and lastFlyToParams then
         watchdogCancelledTask = {
             taskName     = FlyPathfinder.currentTask,
             destination  = lastFlyToParams.destination,
             speed        = lastFlyToParams.speed,
             mode         = lastFlyToParams.mode,
-            resumeAfter  = os.clock() + FLIGHT_BLOCK_AFTER_CANCEL
+            waitingForGround = true,
+            resumeAfter  = nil
         }
     end
-    flightBlockedUntil = os.clock() + FLIGHT_BLOCK_AFTER_CANCEL
+    waitingForGroundTouch = true
     if FlyPathfinder.isNavigating then
         FlyPathfinder.Stop()
     end
-    pcall(notify, "[FlightWatchdog] " .. reason, 4)
+    -- Nhả PlatformStand để nhân vật rơi xuống đất tự nhiên
+    local hum = Character and Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.PlatformStand = false
+    end
+    pcall(notify, "[Watchdog] " .. reason .. " — Rơi xuống chạm đất để hồi bay!", 3)
+    print(string.format("[Watchdog] %s -> Dang cho cham dat de hoi stamina...", reason))
 end
 
 FlyPathfinder.isFlightBlocked = function()
-    return os.clock() < flightBlockedUntil
+    if waitingForGroundTouch then
+        if not isCharacterOnGround() then
+            return true
+        end
+    end
+    return false
 end
 
 -- Dừng/chặn bay theo loại task ("quest", "farm", "impeldown", ...)
@@ -4821,16 +4781,25 @@ FlyPathfinder.cancelTask = function(taskName, seconds)
     end
 end
 
-local staminaWatch = { lastValue = nil, lastChange = 0 }
+local staminaWatch = { lastValue = nil, lastChange = 0, lastGroundCheck = 0, lastGroundY = nil }
 RunService.Heartbeat:Connect(function()
-    -- AUTO-RESUME: nếu có task bị watchdog hủy và block đã hết → gọi lại FlyTo
-    if watchdogCancelledTask and os.clock() >= watchdogCancelledTask.resumeAfter then
-        local t = watchdogCancelledTask
-        watchdogCancelledTask = nil
-        -- Chỉ resume nếu không có flight mới đang chạy và không bị block
-        if not FlyPathfinder.isFlightBlocked() and not FlyPathfinder.isNavigating then
-            print(string.format("[FlightWatchdog] Auto-resume task=%s sau block %ds", t.taskName, FLIGHT_BLOCK_AFTER_CANCEL))
-            FlyPathfinder.FlyTo(t.destination, t.speed, t.mode, t.taskName)
+    -- AUTO-RESUME KHI CHẠM ĐẤT:
+    if watchdogCancelledTask then
+        if watchdogCancelledTask.waitingForGround then
+            if isCharacterOnGround() then
+                -- Đã chạm đất! Chờ 0.5s để hồi phục stamina rồi mới bay tiếp
+                watchdogCancelledTask.waitingForGround = false
+                watchdogCancelledTask.resumeAfter = os.clock() + 0.5
+                waitingForGroundTouch = false
+                print("[Watchdog] Da cham dat thanh cong! Chuan bi cat canh tiep...")
+            end
+        elseif watchdogCancelledTask.resumeAfter and os.clock() >= watchdogCancelledTask.resumeAfter then
+            local t = watchdogCancelledTask
+            watchdogCancelledTask = nil
+            if not FlyPathfinder.isNavigating and isPlayerAlive() then
+                print(string.format("[Watchdog] Da cham dat xong — Tiep tuc bay task=%s", t.taskName))
+                FlyPathfinder.FlyTo(t.destination, t.speed, t.mode, t.taskName)
+            end
         end
     end
 
@@ -4841,14 +4810,28 @@ RunService.Heartbeat:Connect(function()
     local hrp = getHumanoidRootPart()
     if not (hrp and isPlayerAlive()) then return end
 
-    -- MẶT BIỂN = 1 MẶT ĐẤT: watchdog chỉ quét XUỐNG TỚI TẤM ĐẾ BIỂN 3x3 (y = mặt biển, Sea 1:
-    -- -2.7) — chạm đế là DỪNG, KHÔNG scan qua (không tính đỉnh sóng, không xuyên xuống đáy):
-    --   - chạm SeaProbe đầu tiên  → đang trên BIỂN → groundY = mặt biển (seaSurfaceY)
-    --   - chạm vật rắn khác trước (đảo/đất)      → groundY = Y mặt đất đó
-    local groundY = groundOrSeaBelow(hrp.Position)
+    -- [Lagfix] Throttle groundOrSeaBelow 0.2s/lần (mặt đất dưới chân ít đổi khi bay)
+    -- → watchdog không raycast mỗi frame
+    local nowG = os.clock()
+    if nowG - staminaWatch.lastGroundCheck >= 0.2 then
+        staminaWatch.lastGroundCheck = nowG
+        staminaWatch.lastGroundY = groundOrSeaBelow(hrp.Position)
+    end
+    local groundY = staminaWatch.lastGroundY
     local height = groundY and (hrp.Position.Y - groundY) or 300
     if height <= FLIGHT_HEIGHT_MIN then
         staminaWatch.lastValue = nil
+        return
+    end
+
+    -- [FlyMode] SAFE: không có cách tiêu hao → bay cao > 15 là BẤT HỢP PHÁP NGAY
+    -- (không chờ stamina-freeze 3s) — "không delay khi check trạng thái bay quá độ cao ở SAFE".
+    if FlyMode.state == "SAFE" then
+        staminaWatch.lastValue = nil
+        cancelFlightByWatchdog(string.format(
+            "SAFE bay cao %.0f studs (>%d) — HỦY NGAY (không drain được stamina)",
+            height, FLIGHT_HEIGHT_MIN
+        ))
         return
     end
 
@@ -4864,16 +4847,16 @@ RunService.Heartbeat:Connect(function()
     elseif now - staminaWatch.lastChange > STAMINA_FREEZE_LIMIT then
         staminaWatch.lastValue = nil
         cancelFlightByWatchdog(string.format(
-            "TASK=%s stamina đứng im %.2fs khi bay cao %.0f studs — HỦY BAY",
-            FlyPathfinder.currentTask or "misc", now - staminaWatch.lastChange, height
+            "Stamina dung im %.1fs khi bay cao %.0f studs",
+            now - staminaWatch.lastChange, height
         ))
     end
 end)
 
 -- ================== POSE PIN (GHIM TƯ THẾ) ==================
 -- Game dựng thẳng nhân vật khi chạy anim swing (root motion) → ghim lại MỖI FRAME
--- bằng BodyGyro (không ghi hrp.CFrame — anti-cheat). Chạy độc lập với combat loop
--- nên trong lúc callAttack bận chém vẫn giữ được tư thế nằm ngang.
+-- bằng BodyGyro (không ghi hrp.CFrame — anti-cheat). Chạy độc lập với combat loop.
+-- Tư thế nằm ngang (dive) đã XÓA theo yêu cầu — luôn đứng thẳng.
 local PosePin = { active = false, dive = false, targetGetter = nil, lastUpdate = 0 }
 local function setPosePin(active, dive, targetGetter)
     PosePin.active = active
@@ -4894,7 +4877,6 @@ RunService.Heartbeat:Connect(function()
     local t = PosePin.targetGetter and PosePin.targetGetter()
     if not (gyro and gyro.Parent and hrp and t) then return end
     local cf = CFrame.lookAt(hrp.Position, t)
-    if PosePin.dive then cf = cf * CFrame.Angles(math.pi / 2, 0, 0) end
     gyro.CFrame = cf
 end)
 
@@ -5319,6 +5301,92 @@ local function computeTerrainFollowPath(startPos, targetPos, ignoreInstances)
 end
 
 -- ==============================================================================
+--  OBSTACLE-CROSSED DESCENT — phát hiện "đã vượt xong vật cản → hạ về độ cao an toàn"
+--  FlyPathfinder (Smart3D/SkyCruise) CHƯA có state này như legacy Fly (bridgeActive):
+--  sau khi leo tường/cây, nó cứ bay lơ lửng trên cao (tốn stamina + watchdog dễ nghi).
+--  Giải pháp: theo dõi wasBlocked → clear. Khi tia tới target từng bị chặn rồi
+--  THÔNG TRỞ LẠI = đã qua vật cản → bật phase DESCEND tới độ cao an toàn
+--  (SAFE: terrainFloor + margin; RISK: giữ nguyên nếu vẫn cần cao cho chặng tới).
+local ObDescent = {
+    wasBlocked  = false,  -- tia tới target đang bị chặn bởi tường (đang vượt)
+    descending  = false,  -- đang trong phase hạ xuống độ cao an toàn
+    safeY       = nil,    -- độ cao an toàn cần hạ tới
+    descendUntil= 0,      -- thời điểm kết thúc hạ (có thể duy trì vài giây)
+    lastCheck   = 0,      -- throttle raycast check (tốn)
+}
+
+local OBSTACLE_DESCEND_CHECK_INTERVAL = 0.25
+local OBSTACLE_DESCEND_HOLD_SECONDS    = 3
+
+--- Kiểm tra mỗi frame: đã vượt xong vật cản chưa → trả về desiredY an toàn (hoặc nil)
+--- Chỉ chạy raycast 4 lần/giây (interval), giữa các lần dùng cache → không lag
+local function getObstacleDescendY(hrpPos, targetPos, targetModel)
+    if not (hrpPos and targetPos) then return nil end
+    local now = os.clock()
+
+    -- Đang trong phase hạ (hold) → giữ nguyên safeY tới hết hold
+    if ObDescent.descending then
+        if now < ObDescent.descendUntil then
+            return ObDescent.safeY
+        end
+        ObDescent.descending = false
+        ObDescent.safeY = nil
+        return nil
+    end
+
+    -- Throttle raycast: không check mỗi frame
+    if now - ObDescent.lastCheck < OBSTACLE_DESCEND_CHECK_INTERVAL then
+        return nil
+    end
+    ObDescent.lastCheck = now
+
+    local blocked = isSeparatedByThickWall(hrpPos, targetPos, targetModel, true)
+    if blocked then
+        -- Vẫn bị chắn: nhớ đang vượt
+        ObDescent.wasBlocked = true
+        return nil
+    end
+
+    -- Tia THÔNG trở lại sau khi từng bị chắn → ĐÃ VƯỢT XONG vật cản
+    if ObDescent.wasBlocked then
+        ObDescent.wasBlocked = false
+        ObDescent.descending = true
+        ObDescent.descendUntil = now + OBSTACLE_DESCEND_HOLD_SECONDS
+
+        -- Độ cao an toàn: mặt đất/nước dưới chân + margin (SAFE)
+        local gy, isSea = groundOrSeaBelow(hrpPos)
+        local safeY
+        if isSea then
+            safeY = gy + SEA_LOW_FLY_MARGIN
+        else
+            safeY = gy + TERRAIN_FOLLOW_MARGIN
+        end
+        ObDescent.safeY = safeY
+
+        -- RISK: nếu target còn XA (cần giữ cao cho chặng sau) thì không ép hạ sát đất,
+        -- chỉ hạ về mức tối thiểu hợp pháp khi ở mode SAFE
+        local mode = (canDrainStamina() and "RISK") or "SAFE"
+        if mode == "RISK" and ObDescent.safeY then
+            local distToTarget = (hrpPos - targetPos).Magnitude
+            if distToTarget > 150 then
+                -- Còn xa: hạ về độ cao bay cao bình thường (không sát đất)
+                ObDescent.safeY = math.max(ObDescent.safeY, hrpPos.Y - 30)
+            end
+        end
+        print(string.format("[Fly] Đã vượt vật cản → hạ về y=%.1f (%s)", ObDescent.safeY, mode))
+        return ObDescent.safeY
+    end
+    return nil
+end
+
+local function resetObstacleDescent()
+    ObDescent.wasBlocked = false
+    ObDescent.descending = false
+    ObDescent.safeY = nil
+    ObDescent.descendUntil = 0
+end
+
+-- ==============================================================================
 --  FLY3D CHUNK — A* 3D tìm đường bay NHANH NHẤT quanh vật cản (cây/tường/đồi)
 --  Chỉ tính ≤ FLY3D_CHUNK_WPS waypoint (5) mỗi lần tới sub-goal (cách ~70 studs) —
 --  hết 5 waypoint lại tính chunk mới → không build cả đường dài 1 lúc → KHÔNG LAG.
@@ -5333,6 +5401,9 @@ local FLY3D_STEP       = 14
 local FLY3D_CORRIDOR   = 100
 local FLY3D_MAX_NODES  = 900
 local function computeFly3DChunk(currentPos, subGoal, ignoreList, noDrain)
+ -- [FlyMode] LOS thẳng thông → không cần PFS/A* (PFS ComputeAsync là server-blocking gây lag
+ -- trên mode SAFE). Chỉ tính đường chi tiết khi có vật cản chặn thật sự.
+ if has3DLineOfSight(currentPos, subGoal, ignoreList) then return { currentPos, subGoal } end
  if noDrain then
   -- Không drain được stamina: chỉ bay ≤ 15 studs → bám địa hình (biển: mặt nước+2, đất: +8),
   -- chunk tối đa 5 waypoint; cây/tường cao → vòng qua bên hông (đường PFS men theo địa hình)
@@ -5345,13 +5416,11 @@ local function computeFly3DChunk(currentPos, subGoal, ignoreList, noDrain)
    if #slim >= FLY3D_CHUNK_WPS - 1 then break end
   end
   if #slim == 1 then table.insert(slim, subGoal) end
-  slim[#slim] = subGoal
-  return slim
- end
+slim[#slim] = subGoal
+   return slim
+  end
 
- if has3DLineOfSight(currentPos, subGoal, ignoreList) then return { currentPos, subGoal } end
-
- -- Lưới node 3D quanh đoạn current→subGoal: dọc theo tuyến, ngang ±100, 3 tầng cao
+  -- Lưới node 3D quanh đoạn current→subGoal: dọc theo tuyến, ngang ±100, 3 tầng cao
  local dirH = Vector3.new(subGoal.X - currentPos.X, 0, subGoal.Z - currentPos.Z)
  local hLen = dirH.Magnitude
  if hLen < 0.01 then return { currentPos, subGoal } end
@@ -5525,7 +5594,7 @@ function FlyPathfinder.SetupPhysics()
     if not FlyPathfinder.currentGyro or not FlyPathfinder.currentGyro.Parent then
         local gyro = Instance.new("BodyGyro")
         gyro.Name = "FlyPathfinder_Gyro"
-        gyro.MaxTorque = Vector3.new(1, 1, 1) * math.huge
+        gyro.MaxTorque = Vector3.new(0, 1, 1) * math.huge -- [FlyMode] khóa xoay trục X (pitch)
         gyro.P = 5000
         gyro.D = 800
         gyro.CFrame = hrp.CFrame
@@ -5604,16 +5673,20 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
     FlyPathfinder.ownerToken = (FlyPathfinder.ownerToken or 0) + 1
     local myToken = FlyPathfinder.ownerToken
 
+    -- [FlyMode] Cập nhật trạng thái SAFE/RISK cho chuyến bay này
+    refreshFlyMode()
+    resetObstacleDescent()
+
     FlyPathfinder.isNavigating = true
     FlyPathfinder.SetupPhysics()
 
-    local speed = tonumber(customSpeed) or (Options and Options.ImpelSpeed and tonumber(Options.ImpelSpeed.Value)) or FlyPathfinder.Config.FlySpeed
+    local speed = math.min(tonumber(customSpeed) or (Options and Options.ImpelSpeed and tonumber(Options.ImpelSpeed.Value)) or FlyPathfinder.Config.FlySpeed, maxFlightSpeed())
     local startPos = hrp.Position
     local totalDist = (targetPos - startPos).Magnitude
 
     FlyPathfinder.currentTask = taskName
-    print(string.format("[Fly] TASK=%s mode=%s → (%.1f, %.1f, %.1f) | dist=%.0f studs",
-        taskName, customMode or "auto", targetPos.X, targetPos.Y, targetPos.Z, totalDist))
+    print(string.format("[Fly] TASK=%s mode=%s | FlyMode=%s → (%.1f, %.1f, %.1f) | dist=%.0f studs",
+        taskName, customMode or "auto", FlyMode.state, targetPos.X, targetPos.Y, targetPos.Z, totalDist))
     local ignoreList = { Character }
 
     local stamTimer = 0
@@ -5638,6 +5711,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
         local safeDir, _ = resolveCollisionFreeDir(hrp.Position, moveDir, ignoreList, nil)
         local vel = safeDir * curSpeed
         vel = sanitizeVelocity(hrp.Position, vel, ignoreList)
+        -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+        vel = clampSafeAltitude(hrp, vel)
         if FlyPathfinder.currentBV and FlyPathfinder.currentBV.Parent then
             FlyPathfinder.currentBV.Velocity = vel
         end
@@ -5655,7 +5730,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
     local directHit  = castSolidRay(startPos, (targetPos - startPos), rp)
 
     local mode = customMode
-    local noDrain = not canDrainStamina() -- không BlackLeg → luật game chỉ cho bay cao ≤ 15 studs
+    -- [FlyMode] noDrain = không Geppo + không BlackLeg → luật game chỉ cho bay cao ≤ 15 studs
+    local noDrain = FlyMode.state == "SAFE"
     if not mode then
         -- Địa hình không bằng phẳng (đồi/dốc) hoặc đích cao hơn → Smart3D:
         -- PathfindingService nhận diện con đường dốc, thay vì SkyCruise vọt lên trời
@@ -5687,23 +5763,57 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
         local totalWps = 0
         local subGoalIdx = 0
         local isLastChunk = false
-        local function replanChunk()
+        -- [FlyMode] LOOKAHEAD: tính TRƯỚC chunk kế ngay khi sắp hết chunk hiện tại →
+        -- không dừng/khựng giữa các chunk (bay liền mạch, không chờ A* chạy xong).
+        local nextChunkWps, nextChunkLast, nextChunkIdx = nil, false, 0
+
+        local function computeChunk(idx)
          local hrpN = getHumanoidRootPart()
-         if not hrpN then return false end
-         subGoalIdx = subGoalIdx + 1
+         if not hrpN then return nil, false end
          local dx = targetPos.X - startPos.X
          local dz = targetPos.Z - startPos.Z
          local hDist = math.max(1, math.sqrt(dx * dx + dz * dz))
-         local frac = math.min(1, (subGoalIdx * FLY3D_CHUNK_DIST) / hDist)
+         local frac = math.min(1, (idx * FLY3D_CHUNK_DIST) / hDist)
          local sg = Vector3.new(startPos.X + dx * frac, hrpN.Position.Y, startPos.Z + dz * frac)
-         isLastChunk = frac >= 1
-         if isLastChunk then sg = targetPos end
-         waypoints = computeFly3DChunk(hrpN.Position, sg, ignoreList, noDrain)
-         wpIndex = 1
-         totalWps = #waypoints
-         if totalWps == 0 then waypoints = { sg } totalWps = 1 end
-         return true
+         local last = frac >= 1
+         if last then sg = targetPos end
+         local wps = computeFly3DChunk(hrpN.Position, sg, ignoreList, noDrain)
+         if #wps == 0 then wps = { sg } end
+         return wps, last
         end
+
+        local function applyChunk(wps, last, idx)
+         waypoints = wps
+         totalWps = #waypoints
+         isLastChunk = last
+         subGoalIdx = idx
+         wpIndex = 1
+        end
+
+        local function replanChunk()
+         subGoalIdx = subGoalIdx + 1
+         local wps, last = computeChunk(subGoalIdx)
+         applyChunk(wps, last, subGoalIdx)
+         nextChunkWps = nil
+        end
+
+        -- Precompute chunk kế TRƯỚC khi hết chunk hiện tại (chạy 1 lần/chunk)
+        local function ensureNextChunk()
+         if isLastChunk or nextChunkWps then return end
+         local wps, last = computeChunk(subGoalIdx + 1)
+         nextChunkWps, nextChunkLast, nextChunkIdx = wps, last, subGoalIdx + 1
+        end
+
+        -- Chuyển sang chunk kế: dùng bản đã tính sẵn (không block), fallback tính mới
+        local function advanceChunk()
+         if nextChunkWps then
+          applyChunk(nextChunkWps, nextChunkLast, nextChunkIdx)
+          nextChunkWps = nil
+         else
+          replanChunk()
+         end
+        end
+
         local startTime = os.clock()
         local timeout = math.clamp((totalDist / math.max(speed, 50)) * 2.5 + 6, 5, 45)
 
@@ -5736,8 +5846,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
                     arrived = true
                     break
                 end
-                -- Hết chunk → tìm chunk kế (≤5 waypoint, đồ thị nhỏ → repath nhanh, không lag)
-                replanChunk()
+                -- Hết chunk → chuyển sang chunk kế ĐÃ tính sẵn (không block, không khựng)
+                advanceChunk()
                 if wpIndex > totalWps then break end
             end
 
@@ -5751,6 +5861,11 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
                 end
             end
 
+            -- [FlyMode] Sắp hết chunk hiện tại → tính sẵn chunk kế (bay liền mạch)
+            if not isLastChunk and wpIndex >= totalWps - 1 then
+                ensureNextChunk()
+            end
+
             local diff = curWp - hrp.Position
             local dist = diff.Magnitude
 
@@ -5761,7 +5876,7 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
                         arrived = true
                         break
                     end
-                    replanChunk()
+                    advanceChunk()
                     if wpIndex > totalWps then break end
                 end
                 curWp = waypoints[wpIndex]
@@ -5823,6 +5938,26 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
                 lastAvoidSide = side
             end
 
+            -- [FlyMode] Đã vượt xong vật cản → hạ về độ cao an toàn (không lơ lửng trên cao)
+            -- SAFE: hạ NGAY về terrainFloor + margin; RISK: hạ từ từ (không vọt)
+            if not inEscape then
+                local odY = getObstacleDescendY(hrp.Position, targetPos, nil)
+                if odY and hrp.Position.Y > odY + 2 then
+                    local flatDir = Vector3.new(moveDir.X, 0, moveDir.Z)
+                    if flatDir.Magnitude < 0.05 then
+                        flatDir = Vector3.new((targetPos - hrp.Position).X, 0, (targetPos - hrp.Position).Z)
+                    end
+                    local yDiff = hrp.Position.Y - odY
+                    local yBias
+                    if FlyMode.state == "SAFE" then
+                        yBias = -math.min(0.9, yDiff / 60)     -- hạ nhanh, hợp pháp (≤15 studs)
+                    else
+                        yBias = -math.min(0.5, yDiff / 90)     -- RISK: hạ từ từ, không vọt
+                    end
+                    moveDir = (flatDir.Unit * 0.6 + Vector3.new(0, yBias, 0)).Unit
+                end
+            end
+
             local curSpeed = (wpIndex == totalWps) and math.clamp(dist * 5, 10, speed) or speed
             if reverseHits >= 2 then
                 curSpeed = math.min(curSpeed, 35)
@@ -5833,6 +5968,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
 
             local vel = moveDir * curSpeed
             vel = sanitizeVelocity(hrp.Position, vel, ignoreList)
+            -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+            vel = clampSafeAltitude(hrp, vel)
             if FlyPathfinder.currentBV then
                 FlyPathfinder.currentBV.Velocity = vel
             end
@@ -5925,6 +6062,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
             local curSpeed = math.clamp(dist * 4.5, 14, speed)
             local vel = moveDir * curSpeed
             vel = sanitizeVelocity(hrp.Position, vel, ignoreList)
+            -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+            vel = clampSafeAltitude(hrp, vel)
             if FlyPathfinder.currentBV then
                 FlyPathfinder.currentBV.Velocity = vel
             end
@@ -6011,6 +6150,8 @@ function FlyPathfinder.FlyTo(destination, customSpeed, customMode, taskName)
             end
             local vel = landDir.Unit * landSpeed
             vel = sanitizeVelocity(hrp.Position, vel, ignoreList)
+            -- [FlyMode] Giới hạn độ cao SAFE: trần 15 studs trên đất/nước, sàn -1
+            vel = clampSafeAltitude(hrp, vel)
             if FlyPathfinder.currentBV then
                 FlyPathfinder.currentBV.Velocity = vel
             end
@@ -6172,7 +6313,7 @@ local function flyCloseForInteract(targetPos, prompt, speed)
     end
 
     -- Dùng mode DirectLow của FlyPathfinder (bay thấp, không teleport)
-    local flySpeed = math.min(tonumber(speed) or 75, 70)
+    local flySpeed = math.min(tonumber(speed) or 75, maxFlightSpeed())
     local arrived = FlyPathfinder.FlyTo(hoverPos, flySpeed, "DirectLow", "hover")
 
     hrp = getHumanoidRootPart()
@@ -6496,17 +6637,17 @@ killMonster = function(npcData, speed, opts)
             local combatDist, visualDist, serverDist = getCombatDistanceTo(targetHRP.Position)
 
             local needClose = (serverDist > ATTACK_RANGE_SOFT) or (visualDist > ATTACK_RANGE_SOFT) or (distHRP > 2.0)
-            -- Tư thế: ĐÁNH (trong tầm) = nằm ngang; BAY (né/kéo tới, ngoài tầm) = đứng
+            -- Tư thế: đánh trong tầm vẫn ĐỨNG THẲNG (dive đã xóa — không lật nằm ngang)
             canSwing = serverDist <= ATTACK_RANGE_SOFT and visualDist <= ATTACK_RANGE_SOFT
-            AAB_hoverDive = canSwing and "dive" or nil
-            -- POSE PIN: cập nhật tư thế cho heartbeat ghim (dive = nằm ngang)
-            PosePin.dive = canSwing
+            AAB_hoverDive = nil
+            -- POSE PIN: giữ tư thế đứng (không ghim nằm ngang)
+            PosePin.dive = false
             PosePin.lastUpdate = os.clock()
             if needClose then
                 local moveDir = diff.Magnitude > 0.1 and diff.Unit or Vector3.new(0, 0, -1)
                 -- Visual sát nhưng server còn xa: kéo mạnh hơn bằng BV (không CFrame)
                 local pullMul = (visualDist <= ATTACK_RANGE_SOFT and serverDist > ATTACK_RANGE_SOFT) and 7 or 5
-                local safeDir = pullTowardSafe(hrp, targetHover, math.clamp(math.max(distHRP, serverDist) * pullMul, 14, speed))
+                local safeDir = pullTowardSafe(hrp, targetHover, math.clamp(math.max(distHRP, serverDist) * pullMul, 14, math.min(speed, maxFlightSpeed())))
                 -- Luôn xoay mặt về target (dù đang kéo ngang/kéo xuống hay lên đầu)
                 -- Dive ổn định: còn gần điểm hover (<=4.5) thì giữ tư thế nằm ngang
                 -- (ngưỡng distHRP>2.0 cũ làm tư thế lật qua lại mỗi frame khi quái cử động nhẹ)
@@ -6530,7 +6671,7 @@ killMonster = function(npcData, speed, opts)
                 local stillAlive, _, tHRP = isCombatTargetAlive(npcData)
                 if stillAlive and hrp2 and tHRP then
                     local pull = (getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0))) - hrp2.Position
-                    pullTowardSafe(hrp2, getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0)), math.min(speed, 70))
+                    pullTowardSafe(hrp2, getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0)), math.min(speed, maxFlightSpeed(), 70))
                     faceTowardPosition(hrp2, tHRP.Position, FlyPathfinder.currentGyro)
                 elseif not stillAlive then
                     break
@@ -6556,7 +6697,7 @@ killMonster = function(npcData, speed, opts)
                                 local h = getHumanoidRootPart()
                                 if not h then break end
                                 if (retreatPos - h.Position).Magnitude <= 1.5 then break end
-                                pullTowardSafe(h, retreatPos, math.max(speed, 70))
+                                pullTowardSafe(h, retreatPos, math.min(math.max(speed, 70), maxFlightSpeed()))
                                 -- Luôn hướng mặt về target khi né
                                 if retreatTarget and retreatTarget.Parent then
                                     faceTowardPosition(h, retreatTarget.Position, FlyPathfinder.currentGyro)
@@ -6574,7 +6715,7 @@ killMonster = function(npcData, speed, opts)
                     local hrp2 = getHumanoidRootPart()
                     local stillAlive, _, tHRP = isCombatTargetAlive(npcData)
                     if stillAlive and hrp2 and tHRP then
-                        pullTowardSafe(hrp2, getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0)), math.min(speed, 70))
+                        pullTowardSafe(hrp2, getHeadHoverPosition(tHRP) or (tHRP.Position + Vector3.new(0, 1.0, 0)), math.min(speed, maxFlightSpeed()))
                         faceTowardPosition(hrp2, tHRP.Position, FlyPathfinder.currentGyro)
                     elseif not stillAlive then
                         break
