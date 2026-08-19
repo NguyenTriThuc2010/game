@@ -927,9 +927,19 @@ _G.maxFlightSpeed = maxFlightSpeed
 --- [FlyMode] Giới hạn độ cao SAFE: tối đa 15 studs trên mặt đất/nước (càng thấp càng an toàn),
 --- thấp nhất -1 stud (không cắm đầu xuống đất). RISK: không giới hạn độ cao.
 --- Trả về velocity đã clamp Y theo trần/sàn hợp lệ.
+--- [Lagfix] Cache groundOrSeaBelow theo ô lưới 20 studs (mặt đất ít đổi khi di chuyển)
+--- → không raycast mỗi frame (hàm này gọi mỗi frame trong mọi loop bay).
+local _altCache = { key = nil, gy = nil }
 local function clampSafeAltitude(hrp, vel)
  if FlyMode.state ~= "SAFE" then return vel end
- local gy = groundOrSeaBelow(hrp.Position)
+ local px, pz = hrp.Position.X, hrp.Position.Z
+ local key = string.format("%.0f|%.0f", math.floor(px / 20), math.floor(pz / 20))
+ local gy = _altCache.gy
+ if _altCache.key ~= key then
+  gy = groundOrSeaBelow(hrp.Position)
+  _altCache.key = key
+  _altCache.gy = gy
+ end
  if not gy then return vel end
  local height = hrp.Position.Y - gy
  if height > 15 then
@@ -1519,7 +1529,7 @@ FlyPathfinder.cancelTask = function(taskName, seconds)
     end
 end
 
-local staminaWatch = { lastValue = nil, lastChange = 0 }
+local staminaWatch = { lastValue = nil, lastChange = 0, lastGroundCheck = 0, lastGroundY = nil }
 RunService.Heartbeat:Connect(function()
     -- AUTO-RESUME KHI CHẠM ĐẤT:
     if watchdogCancelledTask then
@@ -1548,11 +1558,14 @@ RunService.Heartbeat:Connect(function()
     local hrp = getHumanoidRootPart()
     if not (hrp and isPlayerAlive()) then return end
 
-    -- MẶT BIỂN = 1 MẶT ĐẤT: watchdog chỉ quét XUỐNG TỚI TẤM ĐẾ BIỂN 3x3 (y = mặt biển, Sea 1:
-    -- -2.7) — chạm đế là DỪNG, KHÔNG scan qua (không tính đỉnh sóng, không xuyên xuống đáy):
-    --   - chạm SeaProbe đầu tiên  → đang trên BIỂN → groundY = mặt biển (seaSurfaceY)
-    --   - chạm vật rắn khác trước (đảo/đất)      → groundY = Y mặt đất đó
-    local groundY = groundOrSeaBelow(hrp.Position)
+    -- [Lagfix] Throttle groundOrSeaBelow 0.2s/lần (mặt đất dưới chân ít đổi khi bay)
+    -- → watchdog không raycast mỗi frame
+    local nowG = os.clock()
+    if nowG - staminaWatch.lastGroundCheck >= 0.2 then
+        staminaWatch.lastGroundCheck = nowG
+        staminaWatch.lastGroundY = groundOrSeaBelow(hrp.Position)
+    end
+    local groundY = staminaWatch.lastGroundY
     local height = groundY and (hrp.Position.Y - groundY) or 300
     if height <= FLIGHT_HEIGHT_MIN then
         staminaWatch.lastValue = nil
@@ -2136,6 +2149,9 @@ local FLY3D_STEP       = 14
 local FLY3D_CORRIDOR   = 100
 local FLY3D_MAX_NODES  = 900
 local function computeFly3DChunk(currentPos, subGoal, ignoreList, noDrain)
+ -- [FlyMode] LOS thẳng thông → không cần PFS/A* (PFS ComputeAsync là server-blocking gây lag
+ -- trên mode SAFE). Chỉ tính đường chi tiết khi có vật cản chặn thật sự.
+ if has3DLineOfSight(currentPos, subGoal, ignoreList) then return { currentPos, subGoal } end
  if noDrain then
   -- Không drain được stamina: chỉ bay ≤ 15 studs → bám địa hình (biển: mặt nước+2, đất: +8),
   -- chunk tối đa 5 waypoint; cây/tường cao → vòng qua bên hông (đường PFS men theo địa hình)
@@ -2151,8 +2167,6 @@ local function computeFly3DChunk(currentPos, subGoal, ignoreList, noDrain)
   slim[#slim] = subGoal
   return slim
  end
-
- if has3DLineOfSight(currentPos, subGoal, ignoreList) then return { currentPos, subGoal } end
 
  -- Lưới node 3D quanh đoạn current→subGoal: dọc theo tuyến, ngang ±100, 3 tầng cao
  local dirH = Vector3.new(subGoal.X - currentPos.X, 0, subGoal.Z - currentPos.Z)
